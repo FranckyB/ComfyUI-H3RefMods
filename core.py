@@ -505,6 +505,11 @@ class H3RefMod:
     tags: List[str] = field(default_factory=list)
     description: str = ""     # optional text describing the concept (emitted by the loaders)
     concept_type: str = "generic"  # what this mod represents; see CONCEPT_TYPES above
+    # Optional audio identity: the audio-VAE latent [1, 32, 2, ref_audio_t] and
+    # its frame count.  When present the mod is emitted as a "video_audio" (or
+    # standalone "audio") ref block so the DiT attends to the soundtrack too.
+    audio_latent: Optional[torch.Tensor] = None
+    ref_audio_t: int = 0
 
     def __post_init__(self):
         if self.kind not in ("image", "video"):
@@ -570,10 +575,17 @@ class H3RefMod:
             "latent_w": self.latent_w,
             "latent": latent,
         }
-        if self.kind == "video":
+        has_audio = self.audio_latent is not None and self.ref_audio_t > 0
+        if self.kind == "video" or has_audio:
+            # The DiT only reads audio off video / video_audio / audio blocks —
+            # its "image" branch ignores audio_latent.  So a mod carrying audio
+            # is always emitted as video_audio (an image mod is just a 1-frame
+            # video), which packs the audio rows immediately before the video
+            # rows on the shared cursor.
+            block["kind"] = "video_audio" if has_audio else "video"
             block["latent_t"] = self.latent_t
-            block["ref_audio_t"] = 0
-            block["audio_latent"] = None
+            block["ref_audio_t"] = self.ref_audio_t if has_audio else 0
+            block["audio_latent"] = self.audio_latent if has_audio else None
         return block
 
     # ── serialization ─────────────────────────────────────────────────
@@ -595,9 +607,13 @@ class H3RefMod:
             "tags": self.tags,
             "description": self.description,
             "concept_type": self.concept_type,
+            "ref_audio_t": self.ref_audio_t,
             "_format_version": 2,
         }
-        save_file({"latent": self.latent.contiguous()}, path_no_ext + ".safetensors",
+        tensors = {"latent": self.latent.contiguous()}
+        if self.audio_latent is not None and self.ref_audio_t > 0:
+            tensors["audio_latent"] = self.audio_latent.contiguous()
+        save_file(tensors, path_no_ext + ".safetensors",
                   metadata={META_KEY: json.dumps(meta)})
         return path_no_ext + ".safetensors"
 
@@ -611,7 +627,9 @@ class H3RefMod:
                 f"(header key '{META_KEY}' or sidecar .json missing).")
         # clone drops the file mmap, so the file isn't locked on Windows and
         # can be re-saved over the same name
-        latent = load_file(path_no_ext + ".safetensors", device=device)["latent"].clone()
+        all_tensors = load_file(path_no_ext + ".safetensors", device=device)
+        latent = all_tensors["latent"].clone()
+        audio_latent = all_tensors["audio_latent"].clone() if "audio_latent" in all_tensors else None
         return cls(
             name=meta.get("name", os.path.basename(path_no_ext)),
             kind=meta.get("kind", "image"),
@@ -627,5 +645,7 @@ class H3RefMod:
             tags=list(meta.get("tags", [])),
             description=str(meta.get("description", "") or ""),
             concept_type=str(meta.get("concept_type", "generic") or "generic"),
+            audio_latent=audio_latent,
+            ref_audio_t=int(meta.get("ref_audio_t", 0)),
         )
 
