@@ -1,14 +1,14 @@
 """
 nodes.py — ComfyUI nodes for MiniMax H3 "RefMod" (no-training reference mods)
 
-  MiniMaxH3RefModExtract       — Autogrow reference inputs (image or video frames)
-                                 -> a saved mod, output as an H3_REF_MODS bundle
-  MiniMaxH3RefModFolderLoader  — load every image/video in a folder as an ordered ref list
-  MiniMaxH3RefModsLoader       — load 1-8 mods with a typed strength each (LoRA-style)
-  MiniMaxH3RefModsAxis         — A/B mod pairs on one signed slider each (negative -> A, positive -> B)
-  MiniMaxH3RefModApply         — inject the bundle into a MINIMAX_H3_COND conditioning or the
-                                 built-in ComfyUI CONDITIONING (one node, old ApplyCond
-                                 workflows auto-migrate via node replacement)
+  H3RefModExtract       — Autogrow reference inputs (image or video frames)
+                          -> a saved mod, output as an H3_REF_MODS bundle
+  H3RefModFolderLoader  — load every image/video in a folder as an ordered ref list
+  H3RefModsLoader       — load 1-8 mods with a typed strength each (LoRA-style)
+  H3RefModsAxis         — A/B mod pairs on one signed slider each (negative -> A, positive -> B)
+  H3RefModApply         — inject the bundle into a MINIMAX_H3_COND conditioning or the
+                          built-in ComfyUI CONDITIONING (one node, old ApplyCond
+                          workflows auto-migrate via node replacement)
 
 Mods are stored in ``models/refmods/`` (created on first run, next to loras/
 and unet/); mods saved by older versions in the pack's ``mods/`` folder still
@@ -46,13 +46,13 @@ import comfy.utils
 import folder_paths
 from comfy_api.latest import io
 
-from .common import (
+from ..py.common import (
     list_media_files,
     load_image_file,
     load_video_file,
     refmods_dir,
 )
-from .core import (
+from ..py.core import (
     CONCEPT_TYPES,
     CURVE_DIRECTIONS,
     CURVE_SHAPES,
@@ -66,7 +66,7 @@ from .core import (
     pool_latent,
     read_refmod_meta,
 )
-from .debug_grid import (
+from ..py.debug_grid import (
     graph_pnginfo,
     pil_to_tensor,
     read_graph_meta,
@@ -388,12 +388,12 @@ def _normalize_mask_batch(mask, label: str = "mask") -> torch.Tensor:
     if mask is None:
         return None
     if not isinstance(mask, torch.Tensor):
-        raise ValueError(f"MiniMaxH3RefModExtract: {label} must be a MASK tensor, "
+        raise ValueError(f"H3RefModExtract: {label} must be a MASK tensor, "
                           f"got {type(mask)}")
     if mask.dim() == 2:  # [H, W]
         mask = mask.unsqueeze(0)
     if mask.dim() != 3:
-        raise ValueError(f"MiniMaxH3RefModExtract: {label} has unexpected shape "
+        raise ValueError(f"H3RefModExtract: {label} has unexpected shape "
                           f"{tuple(mask.shape)} (expected [H,W] or [N,H,W])")
     return mask.float().clamp(0.0, 1.0)
 
@@ -462,12 +462,12 @@ def _normalize_ref(src, label: str = "reference") -> torch.Tensor:
     """
     if not isinstance(src, torch.Tensor) or src.dim() not in (3, 4, 5):
         raise ValueError(
-            f"MiniMaxH3RefModExtract: {label} must be a 3-5D tensor, "
+            f"H3RefModExtract: {label} must be a 3-5D tensor, "
             f"got {getattr(src, 'shape', src)}")
     if src.dim() == 5:  # [B, T, H, W, C] batch video
         if src.shape[0] == 0:
             raise ValueError(
-                f"MiniMaxH3RefModExtract: {label} has no frames "
+                f"H3RefModExtract: {label} has no frames "
                 f"(T=0) — check the source image/video.")
         src = src[0] if src.shape[0] == 1 else src.reshape(-1, *src.shape[2:])
     if src.dim() == 3:  # [H, W, C]
@@ -476,15 +476,15 @@ def _normalize_ref(src, label: str = "reference") -> torch.Tensor:
         src = src.movedim(1, -1)
     if src.dim() != 4 or src.shape[-1] != 3:
         raise ValueError(
-            f"MiniMaxH3RefModExtract: {label} has an unexpected layout "
+            f"H3RefModExtract: {label} has an unexpected layout "
             f"{tuple(src.shape)} (expected [T, H, W, 3])")
     if src.shape[0] <= 0:
         raise ValueError(
-            f"MiniMaxH3RefModExtract: {label} has no frames (T={src.shape[0]}) "
+            f"H3RefModExtract: {label} has no frames (T={src.shape[0]}) "
             f"— check the source image/video.")
     if src.shape[1] <= 0 or src.shape[2] <= 0:
         raise ValueError(
-            f"MiniMaxH3RefModExtract: {label} has an empty frame "
+            f"H3RefModExtract: {label} has an empty frame "
             f"({src.shape[1]}x{src.shape[2]}) — check the source image/video.")
     return src
 
@@ -567,7 +567,7 @@ def _ref_blocks(mods, retention, curve=None, seed=-1) -> List[Dict]:
         rng.shuffle(items)
         keep = rng.randint(max(1, len(items) // 2), len(items))
         items = items[:keep]
-        print(f"[MiniMaxH3RefModApply] scramble seed={int(seed)}: "
+        print(f"[H3RefModApply] scramble seed={int(seed)}: "
               f"{len(mods)} refs -> kept {len(items)} (order shuffled)")
     blocks = []
     for mod, strength in items:
@@ -632,10 +632,10 @@ def _prompt_hint(loads) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Node: MiniMaxH3RefModsLoader
+# Node: H3RefModsLoader
 # ═══════════════════════════════════════════════════════════════════════════
 
-class MiniMaxH3RefModsLoader:
+class H3RefModsLoader:
     """Load 1-8 RefMods in one node, each with its own typed strength."""
 
     MAX_SLOTS = 8
@@ -668,7 +668,7 @@ class MiniMaxH3RefModsLoader:
     RETURN_TYPES = ("H3_REF_MODS", "STRING")
     RETURN_NAMES = ("mods", "prompt_hint")
     FUNCTION = "load"
-    CATEGORY = "MiniMax-H3/mod"
+    CATEGORY = "H3RefMod"
 
     @classmethod
     def VALIDATE_INPUTS(cls, **kwargs):
@@ -693,12 +693,12 @@ class MiniMaxH3RefModsLoader:
         for mod, strength, copies in rows:
             loads.extend([(mod, strength)] * copies)
         if loads:
-            print("[MiniMaxH3RefModsLoader] " + ", ".join(
+            print("[H3RefModsLoader] " + ", ".join(
                 f"{m.name}@{s:.2f}" + (f" x{c}" if c > 1 else "")
                 for m, s, c in rows)
                 + f" ({sum(m.token_count * c for m, _, c in rows)} tokens total)")
         else:
-            print("[MiniMaxH3RefModsLoader] no mods selected "
+            print("[H3RefModsLoader] no mods selected "
                   "(all slots (none) or strength 0)")
         if show_info:
             for mod, strength, copies in rows:
@@ -707,15 +707,15 @@ class MiniMaxH3RefModsLoader:
                       + (f"  (x{copies} copies)" if copies > 1 else ""))
         hint = _prompt_hint([(m, s) for m, s, _ in rows])
         if hint:
-            print(f"[MiniMaxH3RefModsLoader] prompt_hint: {hint}")
+            print(f"[H3RefModsLoader] prompt_hint: {hint}")
         return (loads, hint)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Node: MiniMaxH3RefModsAxis (signed A/B sliders)
+# Node: H3RefModsAxis (signed A/B sliders)
 # ═══════════════════════════════════════════════════════════════════════════
 
-class MiniMaxH3RefModsAxis:
+class H3RefModsAxis:
     """A/B mod pairs on one signed slider each.
 
     Each row has an A-side mod, a B-side mod and one ``value`` slider in
@@ -749,7 +749,7 @@ class MiniMaxH3RefModsAxis:
     RETURN_TYPES = ("H3_REF_MODS", "STRING")
     RETURN_NAMES = ("mods", "prompt_hint")
     FUNCTION = "load"
-    CATEGORY = "MiniMax-H3/mod"
+    CATEGORY = "H3RefMod"
 
     @classmethod
     def VALIDATE_INPUTS(cls, **kwargs):
@@ -774,26 +774,26 @@ class MiniMaxH3RefModsAxis:
                 continue
             loads.append((_load_mod(name), min(1.0, abs(value))))
         if loads:
-            print("[MiniMaxH3RefModsAxis] " + ", ".join(
+            print("[H3RefModsAxis] " + ", ".join(
                 f"{m.name}@{s:+.2f}" for m, s in loads)
                 + f" ({sum(m.token_count for m, _ in loads)} tokens total)")
         else:
-            print("[MiniMaxH3RefModsAxis] no rows selected (values 0 or both sides (none))")
+            print("[H3RefModsAxis] no rows selected (values 0 or both sides (none))")
         if show_info:
             for mod, strength in loads:
                 print("\n".join(_info_lines(mod)))
                 print(f"  {'strength':<18} {strength:.2f}")
         hint = _prompt_hint(loads)
         if hint:
-            print(f"[MiniMaxH3RefModsAxis] prompt_hint: {hint}")
+            print(f"[H3RefModsAxis] prompt_hint: {hint}")
         return (loads, hint)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Node: MiniMaxH3RefModApply / ApplyCond
+# Node: H3RefModApply / ApplyCond
 # ═══════════════════════════════════════════════════════════════════════════
 
-class MiniMaxH3RefModApply(io.ComfyNode):
+class H3RefModApply(io.ComfyNode):
     """
     Inject a loader bundle of RefMods into a MiniMax H3 conditioning.
 
@@ -817,14 +817,14 @@ class MiniMaxH3RefModApply(io.ComfyNode):
             "cond",
             allowed_types=[io.Custom("MINIMAX_H3_COND"), io.Conditioning])
         return io.Schema(
-            node_id="MiniMaxH3RefModApply",
+            node_id="H3RefModApply",
             display_name="Apply H3 RefMod",
             description=(
                 "Inject a loader bundle of RefMods into a MiniMax H3 conditioning. "
                 "Accepts both the pack's MINIMAX_H3_COND and the built-in "
                 "CONDITIONING and returns the same type."
             ),
-            category="MiniMax-H3/mod",
+            category="H3RefMod",
             inputs=[
                 io.MatchType.Input("conditioning", template=template,
                     tooltip="MINIMAX_H3_COND (ComfyUI-MiniMaxH3 pack) or CONDITIONING "
@@ -898,6 +898,15 @@ class MiniMaxH3RefModApply(io.ComfyNode):
     def execute(cls, conditioning, mods, retention=1.0,
                 curve_direction="concept_at_end", curve_shape="ease", curve_value=1.0,
                 strength_curve=None, scramble_seed=-1, graph_preset="", save_preset_as=""):
+        if not getattr(cls, "_deprecation_noted", False):
+            cls._deprecation_noted = True
+            print("[H3RefModApply] DEPRECATED: this node injects refs AFTER "
+                  "tokenization, so they get no <Video k>/<Audio j> subject tags. "
+                  "Use 'MiniMax H3 RefMods to Video' instead — it builds conditioning "
+                  "from the prompt + mods directly and tags each refmod at encode "
+                  "time (subject binding + audio routing). Apply remains for legacy "
+                  "workflows and for chaining onto the native ref2va node, and is "
+                  "the only node with per-run curves/scramble for now.")
         # workflows saved before the curve split pass the old single preset name
         curve = strength_curve if strength_curve is not None \
             else (curve_direction, curve_shape, curve_value)
@@ -906,7 +915,7 @@ class MiniMaxH3RefModApply(io.ComfyNode):
         if graph_preset and graph_preset != "(none)":
             loaded = _load_graph_preset(graph_preset)
             if loaded is None:
-                print(f"[MiniMaxH3RefModApply] WARNING: graph preset '{graph_preset}' "
+                print(f"[H3RefModApply] WARNING: graph preset '{graph_preset}' "
                       f"not found or invalid — using widget curve")
             else:
                 curve = loaded
@@ -915,7 +924,7 @@ class MiniMaxH3RefModApply(io.ComfyNode):
         if save_preset_as:
             saved = _save_graph_preset(save_preset_as, curve, img)
             if saved:
-                print(f"[MiniMaxH3RefModApply] graph preset saved: {saved}.png "
+                print(f"[H3RefModApply] graph preset saved: {saved}.png "
                       f"({curve[0]} + {curve[1]} @ {float(curve[2]):.2f})")
         blocks = _ref_blocks(mods, retention, curve, seed=scramble_seed)
         if isinstance(conditioning, list):
@@ -925,21 +934,21 @@ class MiniMaxH3RefModApply(io.ComfyNode):
                 d = dict(t[1])
                 d["minimax_refs"] = list(d.get("minimax_refs", [])) + blocks
                 out.append([t[0], d])
-            print(f"[MiniMaxH3RefModApply] retention={retention} "
+            print(f"[H3RefModApply] retention={retention} "
                   f"({len(blocks)} ref block(s) injected)")
         else:
             # ComfyUI-MiniMaxH3 pack MINIMAX_H3_COND
             out = replace(conditioning, refs=list(conditioning.refs) + blocks)
-            print(f"[MiniMaxH3RefModApply] retention={retention} "
+            print(f"[H3RefModApply] retention={retention} "
                   f"({len(blocks)} ref block(s) injected, {len(out.refs)} total)")
         return io.NodeOutput(out, pil_to_tensor(img))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Node: MiniMaxH3RefModStepCurve
+# Node: H3RefModStepCurve
 # ═══════════════════════════════════════════════════════════════════════════
 
-class MiniMaxH3RefModStepCurve:
+class H3RefModStepCurve:
     """Per-step (per-sigma) reference strength curve, applied at generation time.
 
     The Apply node's frame curve is baked into the ref latent once, before
@@ -984,7 +993,7 @@ class MiniMaxH3RefModStepCurve:
     RETURN_TYPES = ("MODEL",)
     RETURN_NAMES = ("model",)
     FUNCTION = "apply"
-    CATEGORY = "MiniMax-H3/mod"
+    CATEGORY = "H3RefMod"
 
     def apply(self, model, curve_direction="concept_at_end",
               curve_shape="ease", curve_value=1.0):
@@ -993,16 +1002,16 @@ class MiniMaxH3RefModStepCurve:
             comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL,
             "minimax_h3_refmod_step_curve",
             _make_step_wrapper((curve_direction, curve_shape, curve_value)))
-        print(f"[MiniMaxH3RefModStepCurve] {curve_direction} + {curve_shape} "
+        print(f"[H3RefModStepCurve] {curve_direction} + {curve_shape} "
               f"@ {curve_value:.2f} attached — refs re-mixed per denoising step")
         return (model,)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Node: MiniMaxH3RefModFolderLoader
+# Node: H3RefModFolderLoader
 # ═══════════════════════════════════════════════════════════════════════════
 
-class MiniMaxH3RefModFolderLoader:
+class H3RefModFolderLoader:
     """Load every image/video in a folder as an ordered ref list.
 
     Feed the ``refs_bundle`` input of Extract H3 RefMod to bulk-extract a
@@ -1037,7 +1046,7 @@ class MiniMaxH3RefModFolderLoader:
     RETURN_TYPES = ("H3_REF_LIST", "INT")
     RETURN_NAMES = ("refs", "count")
     FUNCTION = "load"
-    CATEGORY = "MiniMax-H3/mod"
+    CATEGORY = "H3RefMod"
 
     @classmethod
     def VALIDATE_INPUTS(cls, folder):
@@ -1071,7 +1080,7 @@ class MiniMaxH3RefModFolderLoader:
         pbar = comfy.utils.ProgressBar(total)
         for i, p in enumerate(items, start=1):
             kind = "video" if p in videos else "image"
-            print(f"[MiniMaxH3RefModFolderLoader] [{i}/{total}] loading {kind} "
+            print(f"[H3RefModFolderLoader] [{i}/{total}] loading {kind} "
                   f"{os.path.basename(p)}")
             try:
                 if p in images:
@@ -1082,26 +1091,26 @@ class MiniMaxH3RefModFolderLoader:
                 failed.append(f"{os.path.basename(p)} ({type(exc).__name__})")
                 pbar.update_absolute(i)
                 continue
-            print(f"[MiniMaxH3RefModFolderLoader] [{i}/{total}] {os.path.basename(p)} "
+            print(f"[H3RefModFolderLoader] [{i}/{total}] {os.path.basename(p)} "
                   f"-> {tuple(refs[-1].shape)}")
             pbar.update_absolute(i)
         if failed:
-            print(f"[MiniMaxH3RefModFolderLoader] skipped unreadable files: {', '.join(failed)}")
+            print(f"[H3RefModFolderLoader] skipped unreadable files: {', '.join(failed)}")
         if not refs:
             raise ValueError(
-                f"MiniMaxH3RefModFolderLoader: no images/videos found in {folder} "
+                f"H3RefModFolderLoader: no images/videos found in {folder} "
                 "(images: png/jpg/jpeg/webp/bmp/gif, videos: mp4/webm/mov/mkv/avi/m4v).")
         n_vid = sum(r.shape[0] > 1 for r in refs)
-        print(f"[MiniMaxH3RefModFolderLoader] loaded {len(refs)} media from {folder} "
+        print(f"[H3RefModFolderLoader] loaded {len(refs)} media from {folder} "
               f"({n_vid} video, {len(refs) - n_vid} image)")
         return (refs, len(refs))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Node: MiniMaxH3RefModExtract (V3 — Autogrow reference inputs)
+# Node: H3RefModExtract (V3 — Autogrow reference inputs)
 # ═══════════════════════════════════════════════════════════════════════════
 
-class MiniMaxH3RefModExtract(io.ComfyNode):
+class H3RefModExtract(io.ComfyNode):
     """
     Turn one or more references of the same concept into a RefMod.
 
@@ -1136,7 +1145,7 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="MiniMaxH3RefModExtract",
+            node_id="H3RefModExtract",
             display_name="Extract H3 RefMod",
             description=(
                 "Turn one or more references of the same concept into a RefMod. "
@@ -1146,9 +1155,9 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
                 "own content instead of averaging away. 'training' mode (default) "
                 "compresses the refs to a grid and refines it — good identity at "
                 "a fraction of the tokens; 'encode' stores the full-res encode "
-                "(max identity, MB-size mod)."
+                "(max identity, MB-size mod, ~1K tokens/img)."
             ),
-            category="MiniMax-H3/mod",
+            category="H3RefMod",
             inputs=[
                 io.String.Input("name", default="my_concept",
                     tooltip="Saved mod name (appears in the Load H3 RefMods dropdown after a reload)."),
@@ -1265,7 +1274,7 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
         mode = normalize_mode(mode)  # accept legacy 'full'/'pooled'
         if concept_type == "identity" and mode == "training" and max(pool_h, pool_w) < 16:
             print(
-                f"[MiniMaxH3RefModExtract] warning: concept_type='identity' with "
+                f"[H3RefModExtract] warning: concept_type='identity' with "
                 f"mode='training' at a {pool_h}x{pool_w} grid — pooling averages away "
                 f"exactly the detail that carries a face (this is almost certainly "
                 f"your 'chubby/older' drift). For a person, either switch mode='encode' "
@@ -1283,7 +1292,7 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
                 pool_w = pool_h
         if av_encoder is None and vae is None:
             raise ValueError(
-                "MiniMaxH3RefModExtract: connect an av_encoder (MiniMax-H3 "
+                "H3RefModExtract: connect an av_encoder (MiniMax-H3 "
                 "VAE loader) or a standard VAE.")
         pack = None
         if av_encoder is not None:
@@ -1320,7 +1329,7 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
                     ordered.append((norm, norm.shape[0] > 1))
         if not ordered:
             raise ValueError(
-                "MiniMaxH3RefModExtract: connect at least one image to "
+                "H3RefModExtract: connect at least one image to "
                 "ref_image_1, or video frames to ref_video_1, or a folder bundle.")
         sources = []
         for i, (src, is_video) in enumerate(ordered):
@@ -1348,7 +1357,7 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
             h0, w0 = sources[0][0].shape[1], sources[0][0].shape[2]
             pool_grid = aspect_grid(pool_h, pool_w, h0 / w0)
             if pool_grid != (pool_h, pool_w):
-                print(f"[MiniMaxH3RefModExtract] pooled grid {pool_h}x{pool_w} -> "
+                print(f"[H3RefModExtract] pooled grid {pool_h}x{pool_w} -> "
                       f"{pool_grid[0]}x{pool_grid[1]} to match source aspect "
                       f"{w0}x{h0} (avoids squishing the subject wide)")
         gh, gw = pool_grid if pool_grid is not None else (pool_h, pool_w)
@@ -1359,7 +1368,7 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
                 mask_batch = mask_batch.expand(len(sources), -1, -1)
             elif mask_batch.shape[0] != len(sources):
                 raise ValueError(
-                    f"MiniMaxH3RefModExtract: mask has {mask_batch.shape[0]} entries but "
+                    f"H3RefModExtract: mask has {mask_batch.shape[0]} entries but "
                     f"there are {len(sources)} references (images then videos, in order). "
                     f"Connect one mask (broadcasts to every ref) or exactly one per ref.")
 
@@ -1371,7 +1380,7 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
         for src_idx in range(len(sources)):
             src, is_video = sources[src_idx]
             label = f"ref {src_idx + 1}/{n_refs} ({'video' if is_video else 'image'})"
-            print(f"[MiniMaxH3RefModExtract] {label}: "
+            print(f"[H3RefModExtract] {label}: "
                   f"source {tuple(src.shape)}, mode={mode}"
                   + (f", identity={identity} steps" if mode == "training" and identity > 0 else ""))
             if mode == "encode":
@@ -1389,14 +1398,14 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
                 orig = (src.shape[1], src.shape[2])
                 src = _resize_ref(src, ref_resolution, None)
                 if (src.shape[1], src.shape[2]) != orig:
-                    print(f"[MiniMaxH3RefModExtract] {label}: resized "
+                    print(f"[H3RefModExtract] {label}: resized "
                           f"{orig[0]}x{orig[1]} -> {src.shape[1]}x{src.shape[2]} "
                           f"(ref_resolution={ref_resolution}) before encode")
             src = _ensure_min_size(src)
             if is_video and src.shape[0] > 1:
                 valid_t = _snap_to_causal_grid(src.shape[0])
                 if valid_t != src.shape[0]:
-                    print(f"[MiniMaxH3RefModExtract] reference {src_idx + 1} "
+                    print(f"[H3RefModExtract] reference {src_idx + 1} "
                           f"(video): trimming {src.shape[0]} -> {valid_t} frames "
                           f"to match the VAE's causal 4k+1 grid.")
                     src = src[:valid_t]
@@ -1405,7 +1414,7 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
                 mask_px = _resize_mask(mask_batch[src_idx:src_idx + 1], src.shape[1], src.shape[2])
             if src.shape[1] <= 0 or src.shape[2] <= 0:
                 raise ValueError(
-                    f"MiniMaxH3RefModExtract: reference {src_idx + 1} "
+                    f"H3RefModExtract: reference {src_idx + 1} "
                     f"({'video' if is_video else 'image'}) has an empty frame "
                     f"{tuple(src.shape)} right before VAE encode (mode={mode}, "
                     f"ref_resolution={ref_resolution}, canvas={canvas}). "
@@ -1435,7 +1444,7 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
 
             if mask_px is not None:
                 z = _mask_latent(z, mask_px, background_retention, seed_key=f"{name}:{src_idx}")
-                print(f"[MiniMaxH3RefModExtract] {label}: applied subject mask "
+                print(f"[H3RefModExtract] {label}: applied subject mask "
                       f"(background_retention={background_retention})")
 
             if mode == "encode":
@@ -1445,18 +1454,18 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
                 gh, gw = pool_grid if pool_grid is not None else (pool_h, pool_w)
                 pooled = pool_latent(z, pool_t, gh, gw).to(torch.float16)
                 if identity > 0:
-                    print(f"[MiniMaxH3RefModExtract] {label}: refining identity "
+                    print(f"[H3RefModExtract] {label}: refining identity "
                           f"({int(identity)} gradient steps)...")
                     pooled = optimize_latent(pooled, z.float(), steps=int(identity),
                                               progress_every=100)
-                    print(f"[MiniMaxH3RefModExtract] {label}: identity refinement done")
+                    print(f"[H3RefModExtract] {label}: identity refinement done")
             frames.append(pooled)
             if is_video:
                 n_vid += 1
             else:
                 n_img += 1
             pbar.update_absolute(src_idx + 1)
-            print(f"[MiniMaxH3RefModExtract] {label}: encoded "
+            print(f"[H3RefModExtract] {label}: encoded "
                   f"{tuple(pooled.shape)} ({pooled.numel() * pooled.element_size() / 1024 / 1024:.2f} MB)")
             # drop the decoded source and the full-res latent as soon as we're
             # done with them, so a large folder doesn't keep every source +
@@ -1466,7 +1475,7 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
             z = None
 
         if mode == "encode" and identity > 0:
-            print(f"[MiniMaxH3RefModExtract] warning: 'identity' only applies to "
+            print(f"[H3RefModExtract] warning: 'identity' only applies to "
                   f"training mode — encode mode stores the actual encode, so "
                   f"identity={identity} was ignored.")
 
@@ -1503,11 +1512,11 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
             if len(_MOD_CACHE) > _MOD_CACHE_MAX:
                 _MOD_CACHE.pop(next(iter(_MOD_CACHE)))
             _MOD_LIST_CACHE_KEY = None  # new mod -> refresh the dropdown listing
-            print(f"[MiniMaxH3RefModExtract] saved {_summarize(mod)} -> {path}")
+            print(f"[H3RefModExtract] saved {_summarize(mod)} -> {path}")
         else:
-            print(f"[MiniMaxH3RefModExtract] {_summarize(mod)} (not saved)")
+            print(f"[H3RefModExtract] {_summarize(mod)} (not saved)")
         if mod.description:
-            print(f"[MiniMaxH3RefModExtract] description: {mod.description}")
+            print(f"[H3RefModExtract] description: {mod.description}")
         return io.NodeOutput([(mod, 1.0)])
 
 
@@ -1516,48 +1525,21 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
 # ═══════════════════════════════════════════════════════════════════════════
 
 NODE_CLASS_MAPPINGS = {
-    "MiniMaxH3RefModExtract": MiniMaxH3RefModExtract,
-    "MiniMaxH3RefModFolderLoader": MiniMaxH3RefModFolderLoader,
-    "MiniMaxH3RefModsLoader": MiniMaxH3RefModsLoader,
-    "MiniMaxH3RefModsAxis": MiniMaxH3RefModsAxis,
-    "MiniMaxH3RefModApply": MiniMaxH3RefModApply,
-    "MiniMaxH3RefModStepCurve": MiniMaxH3RefModStepCurve,
+    "H3RefModExtract": H3RefModExtract,
+    "H3RefModFolderLoader": H3RefModFolderLoader,
+    "H3RefModsLoader": H3RefModsLoader,
+    "H3RefModsAxis": H3RefModsAxis,
+    "H3RefModApply": H3RefModApply,
+    "H3RefModStepCurve": H3RefModStepCurve,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "MiniMaxH3RefModExtract": "Extract H3 RefMod",
-    "MiniMaxH3RefModFolderLoader": "Load H3 RefMod Folder",
-    "MiniMaxH3RefModsLoader": "Load H3 RefMods",
-    "MiniMaxH3RefModsAxis": "Load H3 RefMod Axis",
-    "MiniMaxH3RefModApply": "Apply H3 RefMod",
-    "MiniMaxH3RefModStepCurve": "H3 RefMod Step Curve",
+    "H3RefModExtract": "Extract H3 RefMod",
+    "H3RefModFolderLoader": "Load H3 RefMod Folder",
+    "H3RefModsLoader": "Load H3 RefMods",
+    "H3RefModsAxis": "Load H3 RefMod Axis",
+    "H3RefModApply": "Apply H3 RefMod",
+    "H3RefModStepCurve": "H3 RefMod Step Curve",
 }
-
-# The old Apply node was split into two (pack MINIMAX_H3_COND vs built-in
-# CONDITIONING); the merged node above accepts both.  Old workflows saved with
-# MiniMaxH3RefModApplyCond are migrated to the merged node at load time by the
-# replacement below (the old id is deliberately not registered so the manager
-# rewrites it).  Registered once at import; PromptServer exists by the time
-# custom nodes load (main.py creates it before init_extra_nodes).
-try:
-    from comfy_api.latest import ComfyAPI
-    from server import PromptServer
-    if PromptServer.instance is not None:
-        manager = PromptServer.instance.node_replace_manager
-        manager.register(io.NodeReplace(
-            new_node_id="MiniMaxH3RefModApply",
-            old_node_id="MiniMaxH3RefModApplyCond",
-            old_widget_ids=["retention"],
-            input_mapping=[
-                {"new_id": "conditioning", "old_id": "conditioning"},
-                {"new_id": "mods", "old_id": "mods"},
-                {"new_id": "retention", "old_id": "retention"},
-            ],
-            output_mapping=[{"new_idx": 0, "old_idx": 0}],
-        ))
-except Exception:
-    # standalone/CLI contexts without a running server: migration just won't
-    # be registered until ComfyUI actually loads the pack
-    pass
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

@@ -193,14 +193,14 @@ def _resolve_extract_mod_script(comfy_dir: Path, extract_mod_script: Path | None
         return extract_mod_script
 
     candidates = [
-        comfy_dir / "custom_nodes" / "ComfyUI-MiniMaxH3Mod" / "extract_mod.py",
-        Path("custom_nodes/ComfyUI-MiniMaxH3Mod/extract_mod.py"),
+        comfy_dir / "custom_nodes" / "ComfyUI-H3RefMods" / "tools" / "extract_mod.py",
+        Path("custom_nodes/ComfyUI-H3RefMods/tools/extract_mod.py"),
     ]
     resolved = _first_existing(candidates)
     if resolved is None:
         raise ValueError(
             f"Could not locate extract_mod.py under ComfyUI custom_nodes: {comfy_dir}. "
-            "Ensure ComfyUI-MiniMaxH3Mod is installed."
+            "Ensure ComfyUI-H3RefMods is installed."
         )
     return resolved
 

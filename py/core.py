@@ -180,7 +180,7 @@ def optimize_latent(
     z_small: torch.Tensor,
     z_full: torch.Tensor,
     steps: int = 150,
-    lr: float = 0.02,
+    lr: float = 00.02,
     device: Optional[torch.device] = None,
     progress_every: int = 0,
 ) -> torch.Tensor:

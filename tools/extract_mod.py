@@ -22,18 +22,18 @@ Two modes:
 Usage
 -----
   # full-res identity mod (recommended for characters)
-  python custom_nodes/ComfyUI-MiniMaxH3Mod/extract_mod.py \
+  python custom_nodes/ComfyUI-H3RefMods/extract_mod.py \
       --image char.png --vae path/to/h3_video_vae.safetensors \
       --name my_character --mode encode --resolution 1024
 
   # tiny concept/motion mod
-  python custom_nodes/ComfyUI-MiniMaxH3Mod/extract_mod.py \
+  python custom_nodes/ComfyUI-H3RefMods/extract_mod.py \
       --video dance.mp4 --vae path/to/h3_video_vae.safetensors \
       --name dance --mode training --pool 4 --latent-frames 2
 
 Multi-reference concept (each ref becomes its own latent frame):
 
-  python custom_nodes/ComfyUI-MiniMaxH3Mod/extract_mod.py \
+  python custom_nodes/ComfyUI-H3RefMods/extract_mod.py \
       --image face_a.png --image face_b.png --image full.png \
       --video dance.mp4 --vae path/to/h3_video_vae.safetensors \
       --name disney_char --mode encode --resolution 1024
@@ -60,8 +60,8 @@ if ROOT not in sys.path:
 
 import torch
 
-from common import load_image_file, load_video_file, refmods_dir
-from core import (CONCEPT_TYPES, H3RefMod, aspect_grid, fit_token_budget,
+from py.common import load_image_file, load_video_file, refmods_dir
+from py.core import (CONCEPT_TYPES, H3RefMod, aspect_grid, fit_token_budget,
                   normalize_mode, optimize_latent, pool_latent)
 
 MAX_VIDEO_FRAMES = 60  # uniform sample cap; temporal pooling averages anyway
@@ -99,6 +99,101 @@ def _load_video(path: str, max_edge: int, max_frames: int = MAX_VIDEO_FRAMES) ->
     return load_video_file(path, max_frames=max_frames, max_edge=max_edge)
 
 
+def _load_audio_waveform(path: str) -> tuple[torch.Tensor, int]:
+    """Load an audio file -> (waveform [1, C, L] float32, sample_rate).
+
+    Tries torchaudio first, then soundfile, then scipy.io.wavfile, so it works
+    regardless of which audio backend the ComfyUI venv has installed.
+    """
+    try:
+        import torchaudio
+        waveform, sr = torchaudio.load(path)  # [C, L]
+        if waveform.dim() == 1:
+            waveform = waveform.unsqueeze(0)
+        return waveform.float(), sr
+    except Exception:
+        pass
+    try:
+        import soundfile as sf
+        data, sr = sf.read(path, always_2d=True)  # [L, C]
+        return torch.from_numpy(data.T).float(), sr  # -> [C, L]
+    except Exception:
+        pass
+    from scipy.io import wavfile
+    sr, data = wavfile.read(path)  # int16/float [L] or [L, C]
+    t = torch.from_numpy(data).float()
+    if t.dim() == 1:
+        t = t.unsqueeze(0)  # [1, L]
+    else:
+        t = t.T  # [C, L]
+    # normalize integer PCM to [-1, 1]
+    if data.dtype.kind in ("i", "u"):
+        t = t / float(2 ** (8 * data.dtype.itemsize - 1))
+    return t, sr
+
+
+def _encode_ref_audio(audio_vae, waveform: torch.Tensor, sr: int, device) -> torch.Tensor:
+    """Encode a waveform to an H3 audio latent [1, 32, 2, T].
+
+    The MiniMax H3 audio VAE's first-stage model takes stereo waveforms as
+    [B, 2, L] at its native sample rate and returns [B, 32, 2, T].  We call the
+    first-stage model directly because the generic comfy.sd.VAE.encode wrapper
+    is shaped for image/video tensors and mangles this audio layout.
+    """
+    vae_sr = getattr(audio_vae, "audio_sample_rate", 32000)
+    if sr != vae_sr:
+        waveform = _resample(waveform, sr, vae_sr)
+    # waveform is [C, L]; the model expects a stereo batch [B, 2, L]
+    if waveform.shape[0] == 1:
+        waveform = waveform.repeat(2, 1)      # mono -> stereo
+    elif waveform.shape[0] > 2:
+        waveform = waveform[:2]               # drop extra channels
+    batch = waveform.unsqueeze(0)             # [1, 2, L]
+    # The audio VAE is tiny and its encode is cheap, so it never needs to
+    # compete for VRAM with a running ComfyUI (which can hold tens of GiB).
+    # Try the requested device, but fall back to CPU on OOM, and offload the
+    # weights afterward so they don't linger on the GPU.
+    import comfy.model_management
+    model = audio_vae.first_stage_model
+    last_err = None
+    for dev in (device, torch.device("cpu")):
+        try:
+            if dev.type == "cuda":
+                comfy.model_management.load_models_gpu([audio_vae.patcher])
+            else:
+                model.to(dev)
+            with torch.no_grad():
+                z = model.encode(batch.to(dev)).float().cpu()  # [1, 32, 2, T]
+            if dev.type == "cuda":
+                # free the weights from the GPU again so a co-running ComfyUI
+                # keeps its VRAM headroom for the actual generation
+                try:
+                    audio_vae.patcher.unpatch_model()
+                except Exception:
+                    pass
+            return z
+        except (torch.OutOfMemoryError, RuntimeError) as e:
+            last_err = e
+            if "out of memory" not in str(e).lower() and "OOM" not in str(e):
+                raise
+            continue
+    raise last_err
+
+
+def _resample(waveform: torch.Tensor, sr: int, target_sr: int) -> torch.Tensor:
+    """Resample [C, L] -> [C, L'] via torchaudio, falling back to scipy."""
+    try:
+        import torchaudio
+        return torchaudio.functional.resample(waveform, sr, target_sr)
+    except Exception:
+        import numpy as np
+        from scipy.signal import resample_poly
+        from math import gcd
+        g = gcd(sr, target_sr)
+        out = resample_poly(waveform.numpy(), target_sr // g, sr // g, axis=-1)
+        return torch.from_numpy(np.ascontiguousarray(out)).float()
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
@@ -111,10 +206,15 @@ def main():
                     help="reference image path (repeatable for multi-view concepts)")
     ap.add_argument("--video", action="append", default=[], metavar="PATH",
                     help="reference video path (repeatable)")
+    ap.add_argument("--audio", action="append", default=[], metavar="PATH",
+                    help="reference audio path (repeatable); encoded with the audio VAE and "
+                         "attached to the mod as a standalone audio ref block")
+    ap.add_argument("--audio-vae", default=None,
+                    help="MiniMax H3 audio VAE .safetensors (required when --audio is used)")
     ap.add_argument("--vae", required=True, help="MiniMax H3 video VAE .safetensors")
     ap.add_argument("--name", default=None, help="mod name (default: first source file stem)")
     ap.add_argument("--output", default=None,
-                    help="output dir (default: custom_nodes/ComfyUI-MiniMaxH3Mod/mods)")
+                    help="output dir (default: custom_nodes/models/refmods)")
     ap.add_argument("--mode", choices=["training", "encode", "full", "pooled"],
                     default="training",
                     help="training = compressed grid refined by --identity (default, good balance); encode = straight full-res VAE encode (~1K tokens/img); full/pooled = old names, still accepted")
@@ -167,6 +267,26 @@ def main():
     sd, metadata = comfy.utils.load_torch_file(args.vae, return_metadata=True)
     vae = comfy.sd.VAE(sd=sd, metadata=metadata, device=device)
     vae.throw_exception_if_invalid()
+
+    # ── encode audio refs (standalone audio identity) ─────────────────
+    audio_latent = None
+    ref_audio_t = 0
+    if args.audio:
+        if not args.audio_vae:
+            ap.error("--audio requires --audio-vae (the MiniMax H3 audio VAE .safetensors)")
+        print(f"[extract] loading audio VAE {args.audio_vae}")
+        asd, ameta = comfy.utils.load_torch_file(args.audio_vae, return_metadata=True)
+        audio_vae = comfy.sd.VAE(sd=asd, metadata=ameta, device=device)
+        audio_vae.throw_exception_if_invalid()
+        aframes = []
+        for path in args.audio:
+            waveform, sr = _load_audio_waveform(path)
+            z = _encode_ref_audio(audio_vae, waveform, sr, device)
+            print(f"[extract] audio {path}: latent {tuple(z.shape)}")
+            aframes.append(z.to(torch.float16))
+        # stack multiple audio refs along the time axis
+        audio_latent = torch.cat(aframes, dim=-1) if len(aframes) > 1 else aframes[0]
+        ref_audio_t = audio_latent.shape[-1]
 
     # ── encode each source (full-res or pooled), then stack along time ──
     pool_w = args.pool_w or args.pool
@@ -275,14 +395,18 @@ def main():
         source_shape=" +".join(shapes),
         pool=f"full-res {px_w}x{px_h}px (short-edge cap {args.resolution}px)" if args.mode == "encode" else f"{total_t}x{gh}x{gw}",
         optimize_steps=args.identity if args.mode == "training" else 0,
-        tags=[f"{n_img} img, {n_vid} vid"] + ([f"x{args.multiplier} repeat"] if args.multiplier > 1 else []),
+        tags=[f"{n_img} img, {n_vid} vid"] + ([f"x{args.multiplier} repeat"] if args.multiplier > 1 else [])
+            + ([f"{ref_audio_t} audio"] if ref_audio_t > 0 else []),
         description=args.description.strip(),
         concept_type=args.concept_type,
+        audio_latent=audio_latent,
+        ref_audio_t=ref_audio_t,
     )
     path = mod.save(os.path.join(out_dir, name))
     mb = latent.numel() * latent.element_size() / 1024 / 1024
+    audio_note = f", +{ref_audio_t} audio frames" if ref_audio_t > 0 else ""
     print(f"[extract] saved {kind} mod '{name}' "
-          f"({mod.token_count} tokens, {mb:.2f} MB) -> {path}")
+          f"({mod.token_count} tokens{audio_note}, {mb:.2f} MB) -> {path}")
     print(f"[extract] load it in ComfyUI with the Load H3 RefMods node "
           f"(dropdown '{name}', strength 1.0 = full ref), then chain "
           f"Apply H3 RefMod (Cond) into your sampling.")
