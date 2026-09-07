@@ -27,16 +27,22 @@ import os
 import sys
 
 from .nodes.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+from .nodes import loader as _loader
+from .nodes import refmods_to_video as _r2v
 from .nodes import extract_from_folder as _eff
 from .nodes import decode_refmod as _dec
 
 NODE_CLASS_MAPPINGS = {
     **NODE_CLASS_MAPPINGS,
+    **_loader.NODE_CLASS_MAPPINGS,
+    **_r2v.NODE_CLASS_MAPPINGS,
     **_eff.NODE_CLASS_MAPPINGS,
     **_dec.NODE_CLASS_MAPPINGS,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     **NODE_DISPLAY_NAME_MAPPINGS,
+    **_loader.NODE_DISPLAY_NAME_MAPPINGS,
+    **_r2v.NODE_DISPLAY_NAME_MAPPINGS,
     **_eff.NODE_DISPLAY_NAME_MAPPINGS,
     **_dec.NODE_DISPLAY_NAME_MAPPINGS,
 }
