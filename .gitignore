@@ -1,2 +1,20 @@
+# Python bytecode / caches
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / OS clutter
+*.swp
+*.swo
+*~
+.DS_Store
+.directory
+Thumbs.db
+
+# Tooling
+.history/
