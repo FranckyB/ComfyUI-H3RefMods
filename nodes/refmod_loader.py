@@ -4,9 +4,12 @@ refmod_single.py — H3RefModSingleLoader + H3RefModsCombine.
 A LoRA-loader-style pair, as an alternative to the fixed-size
 H3RefModStacker (nodes/refmod_stacker.py):
 
-  H3RefModLoader — load ONE RefMod with its own strength and an
-                          optional description override, output as a single
-                          ``H3_REFMOD`` row.
+  H3RefModLoader        — load ONE RefMod with its own strength and 
+                          output as a single ``H3_REFMOD`` row.
+
+  H3RefModStacker        — collect multiple ``H3_REFMOD`` rows into one ``H3_REF_MODS``
+                          bundle; the input is a fixed 8-row combo list.
+  
   H3RefModsCombine      — collect ``H3_REFMOD`` rows into one ``H3_REF_MODS``
                           bundle; the input grows a new slot every time you
                           connect another Load H3 RefMod node (autogrow,
@@ -14,24 +17,6 @@ H3RefModStacker (nodes/refmod_stacker.py):
                           ref_video_N inputs), instead of picking from a
                           fixed 8-row combo list.
 
-Why a description override at load time instead of baked into the mod
-───────────────────────────────────────────────────────────────────────────
-A mod's ``description`` (set at Extract time) is what ``prompt_hint`` merges
-into a prompt string (concept_type + description, e.g. "identity: a ginger
-woman with tattoos"). The same character/motion mod often needs a different
-description depending on what you're generating this time (a different
-outfit, a different action) — baking one fixed description into the saved
-``.safetensors`` means re-extracting just to reword it.
-``H3RefModLoader``'s ``description`` widget overrides the mod's stored
-description for this workflow only; leave it empty to keep using what was
-saved at Extract time.
-
-The resulting bundle (a list of ``(mod, strength, description_override)``
-rows) is the same ``H3_REF_MODS`` type as H3RefModStacker/H3RefModsAxis
-produce (those still emit plain ``(mod, strength)`` 2-tuples) — every
-consumer (Apply H3 RefMod, MiniMax H3 RefMods to Video) goes through
-``nodes.py``'s ``_unpack_row`` helper, so bundles from either loader style
-work interchangeably and can even be mixed.
 """
 
 from __future__ import annotations
@@ -46,7 +31,7 @@ from ..py.refmod_core import H3RefMod
 
 
 class H3RefModLoader:
-    """Load a single RefMod with its own strength and an optional description override."""
+    """Load a single RefMod with its own strength override."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -59,11 +44,6 @@ class H3RefModLoader:
                                "(official behavior). Lower values blur the ref toward a softened "
                                "copy of itself — identity fades smoothly instead of turning into "
                                "static/noise texture. 0 skips the mod entirely."}),
-                "description": ("STRING", {"default": "", "multiline": True,
-                    "tooltip": "Override this mod's stored description for this workflow (leave "
-                               "empty to use the description saved at Extract time). Merged into "
-                               "prompt_hint. Doesn't touch the saved mod file or its reference "
-                               "latent."}),
             },
         }
 
@@ -78,17 +58,15 @@ class H3RefModLoader:
             return f"RefMod '{mod}' not found in mods/. Run Extract H3 RefMod first."
         return True
 
-    def load(self, mod, strength=1.0, description=""):
+    def load(self, mod, strength=1.0):
         m = _load_mod(mod)
         strength = min(1.0, max(0.0, float(strength)))
-        desc = description.strip() or None
-        print(f"[H3RefModLoader] {m.name}@{strength:.2f}"
-              + (f" (description override: {desc!r})" if desc else ""))
-        return ((m, strength, desc),)
+        print(f"[H3RefModLoader] {m.name}@{strength:.2f}")
+        return ((m, strength, None),)
 
 
 class H3RefModStacker:
-    """Stack 1-8 RefMods in one node, each with its own strength and description override."""
+    """Stack 1-8 RefMods in one node, each with its own strength override."""
 
     MAX_SLOTS = 8
     NONE = "(none)"
@@ -108,11 +86,6 @@ class H3RefModStacker:
                            "behavior). Lower values blur the ref toward a softened copy of itself — "
                            "identity fades smoothly and stays plausible instead of turning into "
                            "static/noise texture. 0 skips the mod entirely."})
-            required[f"description_{i}"] = ("STRING", {"default": "", "multiline": True,
-                "tooltip": f"Override RefMod {i}'s stored description for this workflow (leave "
-                           f"empty to use the description saved at Extract time). Merged into "
-                           f"prompt_hint. Doesn't touch the saved mod file or its reference "
-                           f"latent."})
         return {"required": required}
 
     RETURN_TYPES = ("H3_REF_MODS", "STRING")
@@ -131,27 +104,25 @@ class H3RefModStacker:
         return True
 
     def stack(self, show_info=False, **kwargs):
-        rows = []  # (mod, strength, description_override)
+        rows = []  # (mod, strength)
         for i in range(1, self.MAX_SLOTS + 1):
             name = str(kwargs.get(f"mod_{i}", self.NONE))
             strength = float(kwargs.get(f"strength_{i}", 1.0))
             if not name or name == self.NONE or strength <= 0.0:
                 continue
-            desc = str(kwargs.get(f"description_{i}", "")).strip() or None
-            rows.append((_load_mod(name), min(1.0, max(0.0, strength)), desc))
+            rows.append((_load_mod(name), min(1.0, max(0.0, strength))))
         if rows:
             print("[H3RefModStacker] " + ", ".join(
-                f"{m.name}@{s:.2f}" + (f" ({d})" if d else "")
-                for m, s, d in rows)
-                + f" ({sum(m.token_count for m, _s, _d in rows)} tokens total)")
+                f"{m.name}@{s:.2f}"
+                for m, s in rows)
+                + f" ({sum(m.token_count for m, _s in rows)} tokens total)")
         else:
             print("[H3RefModStacker] no mods selected "
                   "(all slots (none) or strength 0)")
         if show_info:
-            for mod, strength, desc in rows:
+            for mod, strength in rows:
                 print("\n".join(_info_lines(mod)))
-                print(f"  {'strength':<18} {strength:.2f}"
-                      + (f"  (description override: {desc!r})" if desc else ""))
+                print(f"  {'strength':<18} {strength:.2f}")
         hint = _prompt_hint(rows)
         if hint:
             print(f"[H3RefModStacker] prompt_hint: {hint}")
@@ -161,9 +132,8 @@ class H3RefModStacker:
 def _prompt_hint(rows):
     """Build a merged prompt hint from the RefMod descriptions in a bundle."""
     parts = []
-    for mod, _strength, desc_override in rows:
-        # Use the workflow override when supplied; otherwise keep the description saved in the mod.
-        description = desc_override or getattr(mod, "description", "")
+    for mod, _strength in rows:
+        description = getattr(mod, "description", "")
         if not description:
             continue
         if isinstance(description, str):
@@ -210,15 +180,11 @@ class H3RefModsCombine(io.ComfyNode):
             node_id="H3RefModsCombine",
             display_name="Combine H3 RefMods",
             category="H3RefMod",
-            description="Combine individual 'Load H3 RefMod' outputs into one H3_REF_MODS "
-                        "bundle. The input grows as you connect more mods (LoRA-stack style); "
-                        "connection order = subject/slot order downstream.",
             inputs=[
                 io.Autogrow.Input("mods", optional=True,
                     template=io.Autogrow.TemplateNames(
                         input=io.Custom("H3_REFMOD").Input("mod",
-                            tooltip="One RefMod load (from Load H3 RefMod), with its own "
-                                    "strength and optional description override."),
+                            tooltip="One RefMod load (from Load H3 RefMod), with its own strength override."),
                         names=[f"mod_{i}" for i in range(1, 33)], min=0)),
             ],
             outputs=[

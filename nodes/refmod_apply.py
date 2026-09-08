@@ -498,6 +498,24 @@ def _sanitize_name(name: str) -> str:
     return name
 
 
+def _unique_mod_path(out_dir: str, name: str) -> "tuple[str, str]":
+    """Non-colliding ``(name, path_no_ext)`` for saving a new mod.
+
+    If ``{out_dir}/{name}.safetensors`` doesn't exist, saves under that exact
+    name. Otherwise appends ``_2``, ``_3``, ... until a free name is found —
+    creating a mod never silently overwrites an existing one with the same
+    name; the caller should use the returned ``name`` (not the original) as
+    the mod's own ``name`` field too, so the saved metadata/filename/loader
+    dropdown entry all agree.
+    """
+    candidate = name
+    n = 1
+    while os.path.isfile(os.path.join(out_dir, candidate) + ".safetensors"):
+        n += 1
+        candidate = f"{name}_{n}"
+    return candidate, os.path.join(out_dir, candidate)
+
+
 def _resolve_folder(folder: str) -> str:
     """Resolve a folder input: absolute path, a name inside input/, or input/ itself."""
     folder = (folder or "").strip().strip('"')

@@ -3,20 +3,17 @@ create_refmod.py — H3RefModCreateFromFolder + H3RefModExtract nodes.
 
 Single location for both RefMod-creation methods:
 
-  H3RefModCreateFromFolder — folder-driven extraction, the in-graph
-                              counterpart to the ``tools/generate_refmod.py``
-                              + ``tools/extract_mod.py`` CLI pipeline. Point
-                              it at a dataset folder, give the mod a name and
-                              concept type, and it scans the folder for
-                              reference images / videos / audio, encodes them
-                              with the connected H3 VAEs, and saves the
-                              ``.safetensors`` mod. Audio in the folder is
-                              embedded as the mod's voice.
-  H3RefModExtract           — Autogrow reference inputs (image or video
-                              frames wired directly from other nodes) -> a
-                              saved mod. Refs are added with the "+" button:
-                              stills plug into ``ref_image_1``, video frames
-                              into ``ref_video_1``.
+  H3RefModCreateFromFolder  — folder-driven extraction:
+                              Point it at a dataset folder,
+                              give the mod a name and concept type, and it
+                              scans the folder for reference media (images, videos, audio),
+                              encodes them with the connected H3 VAEs, and saves the mod.
+
+  H3RefModCreateFromInputs  — connection-driven extraction:
+                              Connect media (images, videos, audio) directly.
+                              Give the mod a name and concept type, and it
+                              creates a saved mod from the connected inputs.
+
 
 Both scan/encode their refs with the connected H3 VAE(s) and save a
 ``.safetensors`` mod, output as an ``H3_REF_MODS`` bundle; the only
@@ -67,6 +64,7 @@ from .refmod_apply import (
     _summarize,
     _THUMB_MAX_FRAMES,
     _THUMB_SHORT_EDGE,
+    _unique_mod_path,
 )
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".aac", ".m4a", ".ogg", ".opus"}
@@ -170,6 +168,157 @@ def _encode_ref_audio(audio_vae, waveform: torch.Tensor, sr: int, device) -> tor
     raise last_err
 
 
+def _create_mod_from_folder(
+    folder: str,
+    name: str,
+    mode: str,
+    concept_type: str,
+    vae,
+    audio_vae=None,
+    ref_resolution: int = 1024,
+    max_tokens: int = 8192,
+    identity: int = 500,
+    max_frames: int = 240,
+    description: str = "",
+    save_dir: str = "",
+    save: bool = True,
+) -> H3RefMod:
+    """Create (and optionally save) a single RefMod from one folder."""
+    name = _sanitize_name(name)
+    mode = normalize_mode(mode)
+
+    images, videos, audios = _scan_folder(folder)
+    if not images and not videos:
+        raise ValueError(
+            f"H3RefModCreateFromFolder: no images or videos found in '{folder}'. "
+            "Extraction needs at least one image or video reference.")
+    print(f"[H3RefModCreateFromFolder] {folder}: {len(images)} image(s), "
+          f"{len(videos)} video(s), {len(audios)} audio file(s)")
+
+    device = comfy.model_management.get_torch_device()
+
+    # ── audio identity (optional) ────────────────────────────────────
+    audio_latent = None
+    ref_audio_t = 0
+    if audios:
+        if audio_vae is not None:
+            aframes = []
+            for ap in audios:
+                waveform, sr = _load_audio_waveform(ap)
+                z = _encode_ref_audio(audio_vae, waveform, sr, device)
+                print(f"[H3RefModCreateFromFolder] audio {os.path.basename(ap)}: "
+                      f"latent {tuple(z.shape)}")
+                aframes.append(z.to(torch.float16))
+            audio_latent = torch.cat(aframes, dim=-1) if len(aframes) > 1 else aframes[0]
+            ref_audio_t = audio_latent.shape[-1]
+        else:
+            print(f"[H3RefModCreateFromFolder] {len(audios)} audio file(s) found but no "
+                  "audio_vae connected — audio NOT embedded.")
+
+    # ── load visual refs as tensors ──────────────────────────────────
+    sources = []  # (tensor [T,H,W,3], is_video)
+    for p in images:
+        sources.append((load_image_file(p, max_edge=ref_resolution * 2), False))
+    for p in videos:
+        sources.append((load_video_file(p, max_frames=max_frames,
+                                        max_edge=ref_resolution * 2), True))
+
+    # shared spatial canvas (encode mode) / pool grid (training mode)
+    canvas = None
+    if mode == "encode" and len(sources) > 1:
+        h, w = sources[0][0].shape[1], sources[0][0].shape[2]
+        scale = min(1.0, ref_resolution / min(h, w))
+        canvas = (max(32, round(w * scale / 32) * 32),
+                  max(32, round(h * scale / 32) * 32))
+    pool_grid = None
+    if mode == "training":
+        h0, w0 = sources[0][0].shape[1], sources[0][0].shape[2]
+        pool_grid = aspect_grid(16, 16, h0 / w0)
+    gh, gw = pool_grid if pool_grid is not None else (16, 16)
+
+    # ── encode each source ───────────────────────────────────────────
+    frames = []
+    source_shapes = []
+    n_img = n_vid = 0
+    n_refs = len(sources)
+    pbar = comfy.utils.ProgressBar(n_refs)
+    for idx, (src, is_video) in enumerate(sources):
+        label = f"ref {idx + 1}/{n_refs} ({'video' if is_video else 'image'})"
+        if not is_video:
+            src = src[:1]  # pin stills to a single frame
+        src = _resize_ref(src, ref_resolution, canvas)
+        src = _ensure_min_size(src)
+        if is_video and src.shape[0] > 1:
+            valid_t = _snap_to_causal_grid(src.shape[0])
+            if valid_t != src.shape[0]:
+                src = src[:valid_t]
+        with torch.no_grad():
+            z = vae.encode(src)
+        if z.dim() != 5 or z.shape[1] != 24:
+            raise ValueError(f"Expected a MiniMax H3 video VAE latent [1,24,T,H,W], "
+                             f"got {tuple(z.shape)}. The connected VAE is not the H3 VAE.")
+        source_shapes.append(f"{z.shape[2]}x{z.shape[3]}x{z.shape[4]}")
+        if mode == "encode":
+            pooled = z.to(torch.float16)
+        else:
+            pool_t = min(16, z.shape[2]) if is_video else 1
+            pooled = pool_latent(z, pool_t, gh, gw).to(torch.float16)
+            if identity > 0:
+                pooled = optimize_latent(pooled, z.float(), steps=int(identity),
+                                         progress_every=100)
+        frames.append(pooled)
+        n_vid += 1 if is_video else 0
+        n_img += 0 if is_video else 1
+        print(f"[H3RefModCreateFromFolder] {label}: encoded {tuple(pooled.shape)}")
+        pbar.update_absolute(idx + 1)
+
+    latent = torch.cat(frames, dim=2)
+    if max_tokens > 0:
+        latent = fit_token_budget(latent, max_tokens, name)
+    total_t = latent.shape[2]
+    kind = "video" if total_t > 1 else "image"
+    px_w, px_h = latent.shape[4] * 16, latent.shape[3] * 16
+
+    mod = H3RefMod(
+        name=name,
+        kind=kind,
+        latent=latent,
+        latent_h=latent.shape[3],
+        latent_w=latent.shape[4],
+        latent_t=total_t,
+        mode=mode,
+        source="stack" if len(frames) > 1 else ("video" if n_vid else "image"),
+        source_shape=" +".join(source_shapes),
+        pool=(f"full-res {px_w}x{px_h}px (short-edge cap {ref_resolution}px)"
+              if mode == "encode" else f"{total_t}x{gh}x{gw}"),
+        optimize_steps=int(identity) if mode == "training" else 0,
+        tags=[f"{n_img} img, {n_vid} vid"]
+             + ([f"{ref_audio_t} audio"] if ref_audio_t > 0 else []),
+        description=(description or "").strip(),
+        concept_type=concept_type,
+        audio_latent=audio_latent,
+        ref_audio_t=ref_audio_t,
+    )
+
+    out_dir = save_dir.strip().strip('"') or refmods_dir()
+    if save:
+        saved_name, path_no_ext = _unique_mod_path(out_dir, name)
+        if saved_name != name:
+            print(f"[H3RefModCreateFromFolder] '{name}' already exists in {out_dir} "
+                  f"— saving as '{saved_name}' instead (existing mods are never "
+                  f"overwritten).")
+            mod.name = saved_name
+        path = mod.save(path_no_ext)
+        _MOD_CACHE[saved_name] = mod
+        if len(_MOD_CACHE) > _MOD_CACHE_MAX:
+            _MOD_CACHE.pop(next(iter(_MOD_CACHE)))
+        _nodes_mod._MOD_LIST_CACHE_KEY = None  # refresh the loader dropdown
+        print(f"[CreateH3RefMod] saved {_summarize(mod)} -> {path}")
+    else:
+        print(f"[CreateH3RefMod] {_summarize(mod)} (not saved)")
+    return mod
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Node
 # ═══════════════════════════════════════════════════════════════════════════
@@ -207,6 +356,12 @@ class H3RefModCreateFromFolder(io.ComfyNode):
                     tooltip="Dataset folder with reference images/videos/audio. REQUIRED — "
                             "an absolute path, or a folder name inside ComfyUI's input/ "
                             "directory. The node will NOT run if left empty."),
+                io.Boolean.Input("use_subfolders", default=False,
+                    label_on="subfolders", label_off="single folder",
+                    tooltip="When ON, the folder input is treated as a parent directory: "
+                            "every immediate subfolder is scanned and turned into its own "
+                            "RefMod, named after the subfolder. The 'name' input is ignored "
+                            "in this mode. Great for batch-processing a dataset of concepts."),
                 io.String.Input("name", default="my_concept",
                     tooltip="Saved mod name (appears in the Load H3 RefMods dropdown after a "
                             "reload)."),
@@ -236,17 +391,21 @@ class H3RefModCreateFromFolder(io.ComfyNode):
                 io.String.Input("description", default="", multiline=True,
                     tooltip="Optional text describing the concept, stored in the mod and "
                             "emitted by the loaders' prompt_hint output."),
-                io.String.Input("save_dir", default="", optional=True,
+                io.String.Input("save_dir", default="models/refmods/", optional=True,
                     tooltip="Where to save the mod. Empty = ComfyUI models/refmods/ (default, "
-                            "recommended so the loaders find it). Set a path to save elsewhere."),
+                            "recommended so the loaders find it). Set a path to save elsewhere. "
+                            "If a mod with this name already exists there, it is never "
+                            "overwritten — the save name gets '_2', '_3', etc. appended instead "
+                            "(the console prints the final name used)."),
                 io.Boolean.Input("save", default=True, label_on="save", label_off="don't save",
                     tooltip="Save the mod to disk so Load H3 RefMods can pick it up later."),
             ],
             outputs=[
                 io.Custom("H3_REF_MODS").Output("mods",
-                    tooltip="Bundle with this one freshly created mod at strength 1.0 — feed "
-                            "it straight into Apply H3 RefMod / MiniMax H3 RefMods to Video / "
-                            "Combine H3 RefMods, no reload needed."),
+                    tooltip="Bundle with the freshly created mod(s) at strength 1.0 — feed "
+                            "straight into Apply H3 RefMod / MiniMax H3 RefMods to Video / "
+                            "Combine H3 RefMods, no reload needed. In subfolder mode this "
+                            "contains one mod per subfolder."),
             ],
             is_output_node=True,
         )
@@ -254,7 +413,7 @@ class H3RefModCreateFromFolder(io.ComfyNode):
     @classmethod
     def execute(cls, folder, name, mode, concept_type, vae, audio_vae=None,
                 ref_resolution=1024, max_tokens=8192, identity=500, max_frames=240,
-                description="", save_dir="", save=True) -> io.NodeOutput:
+                description="", save_dir="", save=True, use_subfolders=False) -> io.NodeOutput:
         from .refmod_apply import _resolve_folder
         if not (folder or "").strip().strip('"'):
             raise ValueError(
@@ -262,132 +421,36 @@ class H3RefModCreateFromFolder(io.ComfyNode):
                 "(absolute path, or a name inside input/) — the node refuses to run "
                 "without one so it can't accidentally scan your whole input/ directory.")
         folder = _resolve_folder(folder)
-        name = _sanitize_name(name)
         mode = normalize_mode(mode)
 
-        images, videos, audios = _scan_folder(folder)
-        if not images and not videos:
-            raise ValueError(
-                f"H3RefModCreateFromFolder: no images or videos found in '{folder}'. "
-                "Extraction needs at least one image or video reference.")
-        print(f"[H3RefModCreateFromFolder] {folder}: {len(images)} image(s), "
-              f"{len(videos)} video(s), {len(audios)} audio file(s)")
+        if use_subfolders:
+            subfolders = [
+                os.path.join(folder, d)
+                for d in sorted(os.listdir(folder))
+                if os.path.isdir(os.path.join(folder, d))
+            ]
+            if not subfolders:
+                raise ValueError(
+                    f"H3RefModCreateFromFolder: use_subfolders=True but no subfolders "
+                    f"found in '{folder}'.")
+            print(f"[H3RefModCreateFromFolder] subfolder mode: {len(subfolders)} folder(s)")
+            mods = []
+            for sub in subfolders:
+                sub_name = _sanitize_name(os.path.basename(sub))
+                mod = _create_mod_from_folder(
+                    sub, sub_name, mode, concept_type, vae, audio_vae,
+                    ref_resolution, max_tokens, identity, max_frames,
+                    description, save_dir, save,
+                )
+                mods.append((mod, 1.0))
+            return io.NodeOutput(mods)
 
-        device = comfy.model_management.get_torch_device()
-
-        # ── audio identity (optional) ────────────────────────────────────
-        audio_latent = None
-        ref_audio_t = 0
-        if audios:
-            if audio_vae is not None:
-                aframes = []
-                for ap in audios:
-                    waveform, sr = _load_audio_waveform(ap)
-                    z = _encode_ref_audio(audio_vae, waveform, sr, device)
-                    print(f"[H3RefModCreateFromFolder] audio {os.path.basename(ap)}: "
-                          f"latent {tuple(z.shape)}")
-                    aframes.append(z.to(torch.float16))
-                audio_latent = torch.cat(aframes, dim=-1) if len(aframes) > 1 else aframes[0]
-                ref_audio_t = audio_latent.shape[-1]
-            else:
-                print(f"[H3RefModCreateFromFolder] {len(audios)} audio file(s) found but no "
-                      "audio_vae connected — audio NOT embedded.")
-
-        # ── load visual refs as tensors ──────────────────────────────────
-        sources = []  # (tensor [T,H,W,3], is_video)
-        for p in images:
-            sources.append((load_image_file(p, max_edge=ref_resolution * 2), False))
-        for p in videos:
-            sources.append((load_video_file(p, max_frames=max_frames,
-                                            max_edge=ref_resolution * 2), True))
-
-        # shared spatial canvas (encode mode) / pool grid (training mode)
-        canvas = None
-        if mode == "encode" and len(sources) > 1:
-            h, w = sources[0][0].shape[1], sources[0][0].shape[2]
-            scale = min(1.0, ref_resolution / min(h, w))
-            canvas = (max(32, round(w * scale / 32) * 32),
-                      max(32, round(h * scale / 32) * 32))
-        pool_grid = None
-        if mode == "training":
-            h0, w0 = sources[0][0].shape[1], sources[0][0].shape[2]
-            pool_grid = aspect_grid(16, 16, h0 / w0)
-        gh, gw = pool_grid if pool_grid is not None else (16, 16)
-
-        # ── encode each source ───────────────────────────────────────────
-        frames = []
-        source_shapes = []
-        n_img = n_vid = 0
-        n_refs = len(sources)
-        pbar = comfy.utils.ProgressBar(n_refs)
-        for idx, (src, is_video) in enumerate(sources):
-            label = f"ref {idx + 1}/{n_refs} ({'video' if is_video else 'image'})"
-            if not is_video:
-                src = src[:1]  # pin stills to a single frame
-            src = _resize_ref(src, ref_resolution, canvas)
-            src = _ensure_min_size(src)
-            if is_video and src.shape[0] > 1:
-                valid_t = _snap_to_causal_grid(src.shape[0])
-                if valid_t != src.shape[0]:
-                    src = src[:valid_t]
-            with torch.no_grad():
-                z = vae.encode(src)
-            if z.dim() != 5 or z.shape[1] != 24:
-                raise ValueError(f"Expected a MiniMax H3 video VAE latent [1,24,T,H,W], "
-                                 f"got {tuple(z.shape)}. The connected VAE is not the H3 VAE.")
-            source_shapes.append(f"{z.shape[2]}x{z.shape[3]}x{z.shape[4]}")
-            if mode == "encode":
-                pooled = z.to(torch.float16)
-            else:
-                pool_t = min(16, z.shape[2]) if is_video else 1
-                pooled = pool_latent(z, pool_t, gh, gw).to(torch.float16)
-                if identity > 0:
-                    pooled = optimize_latent(pooled, z.float(), steps=int(identity),
-                                             progress_every=100)
-            frames.append(pooled)
-            n_vid += 1 if is_video else 0
-            n_img += 0 if is_video else 1
-            print(f"[H3RefModCreateFromFolder] {label}: encoded {tuple(pooled.shape)}")
-            pbar.update_absolute(idx + 1)
-
-        latent = torch.cat(frames, dim=2)
-        if max_tokens > 0:
-            latent = fit_token_budget(latent, max_tokens, name)
-        total_t = latent.shape[2]
-        kind = "video" if total_t > 1 else "image"
-        px_w, px_h = latent.shape[4] * 16, latent.shape[3] * 16
-
-        mod = H3RefMod(
-            name=name,
-            kind=kind,
-            latent=latent,
-            latent_h=latent.shape[3],
-            latent_w=latent.shape[4],
-            latent_t=total_t,
-            mode=mode,
-            source="stack" if len(frames) > 1 else ("video" if n_vid else "image"),
-            source_shape=" +".join(source_shapes),
-            pool=(f"full-res {px_w}x{px_h}px (short-edge cap {ref_resolution}px)"
-                  if mode == "encode" else f"{total_t}x{gh}x{gw}"),
-            optimize_steps=int(identity) if mode == "training" else 0,
-            tags=[f"{n_img} img, {n_vid} vid"]
-                 + ([f"{ref_audio_t} audio"] if ref_audio_t > 0 else []),
-            description=(description or "").strip(),
-            concept_type=concept_type,
-            audio_latent=audio_latent,
-            ref_audio_t=ref_audio_t,
+        name = _sanitize_name(name)
+        mod = _create_mod_from_folder(
+            folder, name, mode, concept_type, vae, audio_vae,
+            ref_resolution, max_tokens, identity, max_frames,
+            description, save_dir, save,
         )
-
-        out_dir = save_dir.strip().strip('"') or refmods_dir()
-        if save:
-            path = mod.save(os.path.join(out_dir, name))
-            _MOD_CACHE[name] = mod
-            if len(_MOD_CACHE) > _MOD_CACHE_MAX:
-                _MOD_CACHE.pop(next(iter(_MOD_CACHE)))
-            _nodes_mod._MOD_LIST_CACHE_KEY = None  # refresh the loader dropdown
-            print(f"[CreateH3RefMod] saved {_summarize(mod)} -> {path}")
-        else:
-            print(f"[CreateH3RefMod] {_summarize(mod)} (not saved)")
         return io.NodeOutput([(mod, 1.0)])
 
 
@@ -434,8 +497,8 @@ class H3RefModCreateFromInputs(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="H3RefModExtract",
-            display_name="Extract H3 RefMod",
+            node_id="H3RefModCreateFromInputs",
+            display_name="Create H3 RefMod From Inputs",
             description=(
                 "Turn one or more references of the same concept into a RefMod. "
                 "Stills plug into ref_image_1, video frames into ref_video_1, "
@@ -543,7 +606,10 @@ class H3RefModCreateFromInputs(io.ComfyNode):
                             "hair', 'an animation style', 'handheld camera movement'). Stored in "
                             "the mod and printed in the info block — documentation only, no wiring."),
                 io.Boolean.Input("save", default=True, label_on="save", label_off="don't save",
-                    tooltip="Save the mod to mods/ so Load H3 RefMods can pick it up later."),
+                    tooltip="Save the mod to ComfyUI models/refmods/ so Load H3 RefMods can pick "
+                            "it up later. If a mod with this name already exists there, it is "
+                            "never overwritten — the save name gets '_2', '_3', etc. appended "
+                            "instead (the console prints the final name used)."),
             ],
             outputs=[
                 io.Custom("H3_REF_MODS").Output("mods",
@@ -823,8 +889,13 @@ class H3RefModCreateFromInputs(io.ComfyNode):
         )
 
         if save:
-            path = mod.save(os.path.join(refmods_dir(), name))
-            _MOD_CACHE[name] = mod
+            saved_name, path_no_ext = _unique_mod_path(refmods_dir(), name)
+            if saved_name != name:
+                print(f"[H3RefModCreateFromInputs] '{name}' already exists — saving as "
+                      f"'{saved_name}' instead (existing mods are never overwritten).")
+                mod.name = saved_name
+            path = mod.save(path_no_ext)
+            _MOD_CACHE[saved_name] = mod
             if len(_MOD_CACHE) > _MOD_CACHE_MAX:
                 _MOD_CACHE.pop(next(iter(_MOD_CACHE)))
             _nodes_mod._MOD_LIST_CACHE_KEY = None  # new mod -> refresh the dropdown listing
