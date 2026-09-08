@@ -51,8 +51,8 @@ from ..py.refmod_core import (
     pool_latent,
 )
 # reuse the encode helpers shared with the loader/mods-listing side of the pack
-from . import nodes as _nodes_mod  # the pack's own nodes.py (for _MOD_LIST_CACHE_KEY)
-from .nodes import (
+from . import refmod_apply as _nodes_mod  # the pack's own nodes.py (for _MOD_LIST_CACHE_KEY)
+from .refmod_apply import (
     _ensure_min_size,
     _h3_pack_submodule,
     _mask_latent,
@@ -255,7 +255,7 @@ class H3RefModCreateFromFolder(io.ComfyNode):
     def execute(cls, folder, name, mode, concept_type, vae, audio_vae=None,
                 ref_resolution=1024, max_tokens=8192, identity=500, max_frames=240,
                 description="", save_dir="", save=True) -> io.NodeOutput:
-        from .nodes import _resolve_folder
+        from .refmod_apply import _resolve_folder
         if not (folder or "").strip().strip('"'):
             raise ValueError(
                 "Create H3 RefMod: 'folder' is empty. Point it at a dataset folder "
