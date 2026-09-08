@@ -19,7 +19,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
 
-from .core import CURVE_DIRECTIONS, CURVE_SHAPES, curve_strengths
+from .refmod_core import CURVE_DIRECTIONS, CURVE_SHAPES, curve_strengths
 
 SIZE = 1024
 

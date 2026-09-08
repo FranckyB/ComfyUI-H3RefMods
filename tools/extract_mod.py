@@ -60,11 +60,20 @@ if ROOT not in sys.path:
 
 import torch
 
-from py.common import load_image_file, load_video_file, refmods_dir
-from py.core import (CONCEPT_TYPES, H3RefMod, aspect_grid, fit_token_budget,
+from py.refmod_common import load_image_file, load_video_file, refmods_dir
+from py.refmod_core import (CONCEPT_TYPES, H3RefMod, aspect_grid, fit_token_budget,
                   normalize_mode, optimize_latent, pool_latent)
 
 MAX_VIDEO_FRAMES = 60  # uniform sample cap; temporal pooling averages anyway
+
+# CLIP-vision grounding thumbnail (see py.core.H3RefMod.thumb / .ref_item()):
+# small, downscale-only, real pixels stored alongside the DiT-side latent so
+# clip.tokenize(minimax_ref_items=...) has something to ground a <Picture i>/
+# <Video k> tag in when the mod is later used with MiniMax H3 RefMods to
+# Video. Mirrors nodes.py's H3RefModExtract exactly (same constants) so mods
+# from either path behave identically at Apply time.
+_THUMB_SHORT_EDGE = 384
+_THUMB_MAX_FRAMES = 4
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -325,10 +334,24 @@ def main():
     frames = []
     shapes = []
     n_img = n_vid = 0
+    thumb_frames_list = []
+    thumb_canvas = None
+    n_refs = len(args.image) + len(args.video)
+    thumb_budget = max(1, _THUMB_MAX_FRAMES // max(1, n_refs))
     for path in args.image:
         src = _load_image(path, load_max_edge)
         src = _resize_ref(src, args.resolution, canvas)
         print(f"[extract] image {path}: {tuple(src.shape)} (mode={args.mode})")
+        # capture a small real-pixel thumbnail for CLIP-vision grounding at
+        # Apply time (see py.core.H3RefMod.thumb) before this tensor is
+        # consumed by the VAE encode below.
+        if thumb_canvas is None:
+            th0, tw0 = src.shape[1], src.shape[2]
+            scale0 = min(1.0, _THUMB_SHORT_EDGE / min(th0, tw0))
+            thumb_canvas = (max(32, round(tw0 * scale0 / 32) * 32),
+                            max(32, round(th0 * scale0 / 32) * 32))
+        thumb_src = _resize_ref(src, _THUMB_SHORT_EDGE, thumb_canvas)[:1]
+        thumb_frames_list.append(thumb_src.to(torch.float16))
         with torch.no_grad():
             z = vae.encode(src.to(device)).float().cpu()
         if args.mode == "encode":
@@ -351,6 +374,22 @@ def main():
                 src = src[idx]
         src = _resize_ref(src, args.resolution, canvas)
         print(f"[extract] video {path}: {tuple(src.shape)} (mode={args.mode})")
+        # capture thumbnail frames (see image loop above for rationale); every
+        # source contributes at least one frame so a multi-ref mod's
+        # thumbnail shows every angle, not just the first source.
+        if thumb_canvas is None:
+            th0, tw0 = src.shape[1], src.shape[2]
+            scale0 = min(1.0, _THUMB_SHORT_EDGE / min(th0, tw0))
+            thumb_canvas = (max(32, round(tw0 * scale0 / 32) * 32),
+                            max(32, round(th0 * scale0 / 32) * 32))
+        thumb_src = _resize_ref(src, _THUMB_SHORT_EDGE, thumb_canvas)
+        if thumb_src.shape[0] > 1:
+            n_pick = max(1, min(thumb_budget, thumb_src.shape[0]))
+            idx = torch.linspace(0, thumb_src.shape[0] - 1, n_pick).round().long()
+            thumb_src = thumb_src[idx]
+        else:
+            thumb_src = thumb_src[:1]
+        thumb_frames_list.append(thumb_src.to(torch.float16))
         with torch.no_grad():
             z = vae.encode(src.to(device)).float().cpu()
         if args.mode == "encode":
@@ -381,6 +420,11 @@ def main():
     total_t = latent.shape[2]
     kind = "video" if total_t > 1 else "image"
 
+    thumb = torch.cat(thumb_frames_list, dim=0)
+    if thumb.shape[0] > _THUMB_MAX_FRAMES:
+        idx = torch.linspace(0, thumb.shape[0] - 1, _THUMB_MAX_FRAMES).round().long()
+        thumb = thumb[idx]
+
     out_dir = args.output or refmods_dir()
     px_w, px_h = latent.shape[4] * 16, latent.shape[3] * 16
     mod = H3RefMod(
@@ -401,6 +445,7 @@ def main():
         concept_type=args.concept_type,
         audio_latent=audio_latent,
         ref_audio_t=ref_audio_t,
+        thumb=thumb,
     )
     path = mod.save(os.path.join(out_dir, name))
     mb = latent.numel() * latent.element_size() / 1024 / 1024

@@ -1,10 +1,15 @@
 """
-loader.py — H3RefModsLoader node.
+refmod_stacker.py — H3RefModStacker node.
 
-Load 1-8 RefMods in one node, each with its own typed strength and a per-row
-``copies`` boost (LoRA-loader style).  Outputs an ``H3_REF_MODS`` bundle for
-Apply H3 RefMod, plus a ``prompt_hint`` string merging each mod's
-concept_type + description (concat it onto your prompt instead of retyping).
+Stack 1-8 RefMods in one node, each with its own typed strength and an
+optional description override (LoRA-stacker style).  Outputs an
+``H3_REF_MODS`` bundle for Apply H3 RefMod / MiniMax H3 RefMods to Video,
+plus a ``prompt_hint`` string merging each mod's concept_type + description
+(concat it onto your prompt instead of retyping).
+
+``description_N`` overrides that mod's stored description for this workflow
+only (merged into ``prompt_hint``) — leave empty to use whatever was saved at
+Extract time.  It doesn't touch the saved mod file.
 """
 
 from __future__ import annotations
@@ -17,8 +22,8 @@ from .nodes import (
 )
 
 
-class H3RefModsLoader:
-    """Load 1-8 RefMods in one node, each with its own typed strength."""
+class H3RefModStacker:
+    """Stack 1-8 RefMods in one node, each with its own strength and description override."""
 
     MAX_SLOTS = 8
     NONE = "(none)"
@@ -38,18 +43,16 @@ class H3RefModsLoader:
                            "behavior). Lower values blur the ref toward a softened copy of itself — "
                            "identity fades smoothly and stays plausible instead of turning into "
                            "static/noise texture. 0 skips the mod entirely."})
-            required[f"copies_{i}"] = ("INT", {"default": 1, "min": 1, "max": 10, "step": 1,
-                "display": "number",
-                "tooltip": "How many copies of this mod to inject (1 = normal, 2+ = the same ref "
-                           "repeated — the manual row-duplication trick as a knob, up to 10x). More "
-                           "copies = noticeably stronger reference, but each copy costs its full "
-                           "token count in every DiT block, so it slows down inference and eats "
-                           "VRAM — 2-3 copies is the sweet spot, 10x will be very slow."})
+            required[f"description_{i}"] = ("STRING", {"default": "", "multiline": True,
+                "tooltip": f"Override RefMod {i}'s stored description for this workflow (leave "
+                           f"empty to use the description saved at Extract time). Merged into "
+                           f"prompt_hint. Doesn't touch the saved mod file or its reference "
+                           f"latent."})
         return {"required": required}
 
     RETURN_TYPES = ("H3_REF_MODS", "STRING")
     RETURN_NAMES = ("mods", "prompt_hint")
-    FUNCTION = "load"
+    FUNCTION = "stack"
     CATEGORY = "H3RefMod"
 
     @classmethod
@@ -62,41 +65,38 @@ class H3RefModsLoader:
                         "Run Extract H3 RefMod first.")
         return True
 
-    def load(self, show_info=False, **kwargs):
-        rows = []  # (mod, strength, copies)
+    def stack(self, show_info=False, **kwargs):
+        rows = []  # (mod, strength, description_override)
         for i in range(1, self.MAX_SLOTS + 1):
             name = str(kwargs.get(f"mod_{i}", self.NONE))
             strength = float(kwargs.get(f"strength_{i}", 1.0))
             if not name or name == self.NONE or strength <= 0.0:
                 continue
-            rows.append((_load_mod(name), min(1.0, max(0.0, strength)),
-                         int(kwargs.get(f"copies_{i}", 1))))
-        loads = []
-        for mod, strength, copies in rows:
-            loads.extend([(mod, strength)] * copies)
-        if loads:
-            print("[H3RefModsLoader] " + ", ".join(
-                f"{m.name}@{s:.2f}" + (f" x{c}" if c > 1 else "")
-                for m, s, c in rows)
-                + f" ({sum(m.token_count * c for m, _, c in rows)} tokens total)")
+            desc = str(kwargs.get(f"description_{i}", "")).strip() or None
+            rows.append((_load_mod(name), min(1.0, max(0.0, strength)), desc))
+        if rows:
+            print("[H3RefModStacker] " + ", ".join(
+                f"{m.name}@{s:.2f}" + (f" ({d})" if d else "")
+                for m, s, d in rows)
+                + f" ({sum(m.token_count for m, _s, _d in rows)} tokens total)")
         else:
-            print("[H3RefModsLoader] no mods selected "
+            print("[H3RefModStacker] no mods selected "
                   "(all slots (none) or strength 0)")
         if show_info:
-            for mod, strength, copies in rows:
+            for mod, strength, desc in rows:
                 print("\n".join(_info_lines(mod)))
                 print(f"  {'strength':<18} {strength:.2f}"
-                      + (f"  (x{copies} copies)" if copies > 1 else ""))
-        hint = _prompt_hint([(m, s) for m, s, _ in rows])
+                      + (f"  (description override: {desc!r})" if desc else ""))
+        hint = _prompt_hint(rows)
         if hint:
-            print(f"[H3RefModsLoader] prompt_hint: {hint}")
-        return (loads, hint)
+            print(f"[H3RefModStacker] prompt_hint: {hint}")
+        return (rows, hint)
 
 
 NODE_CLASS_MAPPINGS = {
-    "H3RefModsLoader": H3RefModsLoader,
+    "H3RefModStacker": H3RefModStacker,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "H3RefModsLoader": "Load H3 RefMods",
+    "H3RefModStacker": "Load RefMod Stack",
 }

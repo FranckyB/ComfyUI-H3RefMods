@@ -12,7 +12,9 @@ Nodes
 ─────
   H3RefModExtract       — ref_image_1..N stills + ref_video_1..N clips -> saved mod
   H3RefModFolderLoader  — load every image/video in a folder as an ordered ref list
-  H3RefModsLoader       — load 1-8 mods with a typed strength each (LoRA-style)
+  H3RefModStacker       — stack 1-8 mods with a typed strength + description each (LoRA-stacker style)
+  H3RefModSingleLoader  — load ONE mod with its own strength + description override
+  H3RefModsCombine      — combine H3RefModSingleLoader outputs into one bundle (autogrow, LoRA-stack style)
   H3RefModsAxis         — A/B mod pairs on one signed slider each (negative -> A, positive -> B)
   H3RefModApply         — inject the bundle into MINIMAX_H3_COND (pack) or CONDITIONING (built-in);
                           the old split Apply/ApplyCond merged into one node (old workflows migrate)
@@ -27,23 +29,23 @@ import os
 import sys
 
 from .nodes.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
-from .nodes import loader as _loader
-from .nodes import refmods_to_video as _r2v
-from .nodes import extract_from_folder as _eff
-from .nodes import decode_refmod as _dec
+from .nodes import refmod_stacker
+from .nodes import refmod_single
+from .nodes import refmods_to_video
+from .nodes import refmod_create
 
 NODE_CLASS_MAPPINGS = {
     **NODE_CLASS_MAPPINGS,
-    **_loader.NODE_CLASS_MAPPINGS,
-    **_r2v.NODE_CLASS_MAPPINGS,
-    **_eff.NODE_CLASS_MAPPINGS,
-    **_dec.NODE_CLASS_MAPPINGS,
+    **refmod_stacker.NODE_CLASS_MAPPINGS,
+    **refmod_single.NODE_CLASS_MAPPINGS,
+    **refmods_to_video.NODE_CLASS_MAPPINGS,
+    **refmod_create.NODE_CLASS_MAPPINGS,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     **NODE_DISPLAY_NAME_MAPPINGS,
-    **_loader.NODE_DISPLAY_NAME_MAPPINGS,
-    **_r2v.NODE_DISPLAY_NAME_MAPPINGS,
-    **_eff.NODE_DISPLAY_NAME_MAPPINGS,
-    **_dec.NODE_DISPLAY_NAME_MAPPINGS,
+    **refmod_stacker.NODE_DISPLAY_NAME_MAPPINGS,
+    **refmod_single.NODE_DISPLAY_NAME_MAPPINGS,
+    **refmods_to_video.NODE_DISPLAY_NAME_MAPPINGS,
+    **refmod_create.NODE_DISPLAY_NAME_MAPPINGS,
 }
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

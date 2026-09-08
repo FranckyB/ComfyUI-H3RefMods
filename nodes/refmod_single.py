@@ -1,0 +1,144 @@
+"""
+refmod_single.py — H3RefModSingleLoader + H3RefModsCombine.
+
+A LoRA-loader-style pair, as an alternative to the fixed-size
+H3RefModStacker (nodes/refmod_stacker.py):
+
+  H3RefModSingleLoader — load ONE RefMod with its own strength and an
+                          optional description override, output as a single
+                          ``H3_REFMOD`` row.
+  H3RefModsCombine      — collect ``H3_REFMOD`` rows into one ``H3_REF_MODS``
+                          bundle; the input grows a new slot every time you
+                          connect another Load H3 RefMod node (autogrow,
+                          same "+" pattern as Extract H3 RefMod's ref_image_N/
+                          ref_video_N inputs), instead of picking from a
+                          fixed 8-row combo list.
+
+Why a description override at load time instead of baked into the mod
+───────────────────────────────────────────────────────────────────────────
+A mod's ``description`` (set at Extract time) is what ``prompt_hint`` merges
+into a prompt string (concept_type + description, e.g. "identity: a ginger
+woman with tattoos"). The same character/motion mod often needs a different
+description depending on what you're generating this time (a different
+outfit, a different action) — baking one fixed description into the saved
+``.safetensors`` means re-extracting just to reword it.
+``H3RefModSingleLoader``'s ``description`` widget overrides the mod's stored
+description for this workflow only; leave it empty to keep using what was
+saved at Extract time.
+
+The resulting bundle (a list of ``(mod, strength, description_override)``
+rows) is the same ``H3_REF_MODS`` type as H3RefModStacker/H3RefModsAxis
+produce (those still emit plain ``(mod, strength)`` 2-tuples) — every
+consumer (Apply H3 RefMod, MiniMax H3 RefMods to Video) goes through
+``nodes.py``'s ``_unpack_row`` helper, so bundles from either loader style
+work interchangeably and can even be mixed.
+"""
+
+from __future__ import annotations
+
+from comfy_api.latest import io
+
+from .nodes import _list_mod_names, _load_mod
+
+
+class H3RefModSingleLoader:
+    """Load one RefMod with its own strength and an optional description override."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mod": (_list_mod_names(), {"tooltip": "The RefMod to load."}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "display": "number",
+                    "tooltip": "How strongly this mod's reference is preserved. 1.0 = full ref "
+                               "(official behavior). Lower values blur the ref toward a softened "
+                               "copy of itself — identity fades smoothly instead of turning into "
+                               "static/noise texture. 0 skips the mod entirely."}),
+                "description": ("STRING", {"default": "", "multiline": True,
+                    "tooltip": "Override this mod's stored description for this workflow (leave "
+                               "empty to use the description saved at Extract time). Merged into "
+                               "prompt_hint. Doesn't touch the saved mod file or its reference "
+                               "latent."}),
+            },
+        }
+
+    RETURN_TYPES = ("H3_REFMOD",)
+    RETURN_NAMES = ("mod",)
+    FUNCTION = "load"
+    CATEGORY = "H3RefMod"
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, mod, **kwargs):
+        if mod not in set(_list_mod_names()):
+            return f"RefMod '{mod}' not found in mods/. Run Extract H3 RefMod first."
+        return True
+
+    def load(self, mod, strength=1.0, description=""):
+        m = _load_mod(mod)
+        strength = min(1.0, max(0.0, float(strength)))
+        desc = description.strip() or None
+        print(f"[H3RefModSingleLoader] {m.name}@{strength:.2f}"
+              + (f" (description override: {desc!r})" if desc else ""))
+        return ((m, strength, desc),)
+
+
+class H3RefModsCombine(io.ComfyNode):
+    """Combine individual 'Load H3 RefMod' outputs into one H3_REF_MODS bundle.
+
+    Connect Load H3 RefMod (single) nodes here — the "+" button on ``mods``
+    grows a new slot each time, LoRA-stack style, instead of a fixed-size
+    loader.  Connection order = subject/slot order downstream (MiniMax H3
+    RefMods to Video's ``<Subject N>`` numbering, Apply H3 RefMod's ref
+    order).
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="H3RefModsCombine",
+            display_name="Combine H3 RefMods",
+            category="H3RefMod",
+            description="Combine individual 'Load H3 RefMod' outputs into one H3_REF_MODS "
+                        "bundle. The input grows as you connect more mods (LoRA-stack style); "
+                        "connection order = subject/slot order downstream.",
+            inputs=[
+                io.Autogrow.Input("mods", optional=True,
+                    template=io.Autogrow.TemplateNames(
+                        input=io.Custom("H3_REFMOD").Input("mod",
+                            tooltip="One RefMod load (from Load H3 RefMod), with its own "
+                                    "strength and optional description override."),
+                        names=[f"mod_{i}" for i in range(1, 33)], min=0)),
+            ],
+            outputs=[
+                io.Custom("H3_REF_MODS").Output("mods",
+                    tooltip="Bundle for Apply H3 RefMod / MiniMax H3 RefMods to Video. Slot "
+                            "order = connection order."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, mods=None) -> io.NodeOutput:
+        ordered = []
+        for key in sorted((mods or {}).keys(), key=lambda k: int(k.rsplit("_", 1)[1])):
+            row = (mods or {})[key]
+            if row is not None:
+                ordered.append(row)
+        if not ordered:
+            raise ValueError("H3RefModsCombine: connect at least one Load H3 RefMod.")
+        print("[H3RefModsCombine] " + ", ".join(
+            f"{m.name}@{s:.2f}" + (f" ({d})" if d else "")
+            for m, s, d in ordered)
+            + f" ({sum(m.token_count for m, _s, _d in ordered)} tokens total)")
+        return io.NodeOutput(ordered)
+
+
+NODE_CLASS_MAPPINGS = {
+    "H3RefModSingleLoader": H3RefModSingleLoader,
+    "H3RefModsCombine": H3RefModsCombine,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "H3RefModSingleLoader": "Load RefMod",
+    "H3RefModsCombine": "Combine RefMods",
+}
