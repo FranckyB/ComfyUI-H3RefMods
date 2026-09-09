@@ -534,7 +534,8 @@ def _normalize_mods_input(mods) -> list:
     return list(mods)
 
 
-def _ref_blocks(mods, retention, curve=None, seed=-1) -> List[Dict]:
+def _ref_blocks(mods, retention, curve=None, seed=-1,
+                use_video: bool = True, use_audio: bool = True) -> List[Dict]:
     """Ref blocks for a loader bundle, scaled by row strength x retention.
 
     ``retention`` is a master strength multiplier: a float 0-1 (1.0 =
@@ -568,7 +569,7 @@ def _ref_blocks(mods, retention, curve=None, seed=-1) -> List[Dict]:
     for row in items:
         mod, strength, _desc = _unpack_row(row)
         eff = min(1.0, max(0.0, strength * factor))
-        block = mod.ref_block(eff, curve=curve)
+        block = mod.ref_block(eff, curve=curve, use_video=use_video, use_audio=use_audio)
         if block is not None:
             blocks.append(block)
     return blocks
@@ -759,6 +760,10 @@ class H3RefModApplyAdvanced(io.ComfyNode):
                             "RefMods / Load H3 RefMod Axis / Combine H3 RefMods / Extract H3 "
                             "RefMod) — connect either directly, no Combine node needed for "
                         "just one mod. Leave unconnected to bypass unchanged."),
+                io.Boolean.Input("use_video", default=True,
+                    tooltip="Apply the visual latent from each RefMod. Turn this off to use only embedded audio."),
+                io.Boolean.Input("use_audio", default=True,
+                    tooltip="Apply the embedded audio latent from each RefMod when present. Turn this off for visual-only application."),
                 io.Float.Input("retention", default=1.0, min=0.0, max=1.0, step=0.01,
                     tooltip="Master reference strength, multiplied with each loader row's "
                              "strength. MiniMax retention levels: 1.0 = fully_preserved, "
@@ -823,12 +828,16 @@ class H3RefModApplyAdvanced(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, conditioning, mods, retention=1.0,
+    def execute(cls, conditioning, mods, use_video=True, use_audio=True, retention=1.0,
                 curve_direction="concept_at_end", curve_shape="ease", curve_value=1.0,
                 strength_curve=None, scramble_seed=-1, graph_preset="", save_preset_as=""):
         if mods is None:
             img = render_debug_grid((curve_direction, curve_shape, curve_value), "")
             print("[H3RefModApply] no mods connected — bypassing conditioning unchanged")
+            return io.NodeOutput(conditioning, pil_to_tensor(img))
+        if not use_video and not use_audio:
+            img = render_debug_grid((curve_direction, curve_shape, curve_value), "")
+            print("[H3RefModApply] use_video=False and use_audio=False — bypassing conditioning unchanged")
             return io.NodeOutput(conditioning, pil_to_tensor(img))
         # workflows saved before the curve split pass the old single preset name
         curve = strength_curve if strength_curve is not None \
@@ -849,7 +858,8 @@ class H3RefModApplyAdvanced(io.ComfyNode):
             if saved:
                 print(f"[H3RefModApply] graph preset saved: {saved}.png "
                       f"({curve[0]} + {curve[1]} @ {float(curve[2]):.2f})")
-        blocks = _ref_blocks(mods, retention, curve, seed=scramble_seed)
+        blocks = _ref_blocks(mods, retention, curve, seed=scramble_seed,
+                     use_video=bool(use_video), use_audio=bool(use_audio))
         if isinstance(conditioning, list):
             # built-in ComfyUI CONDITIONING (core MiniMaxH3ReferenceToVideo)
             out = []
@@ -892,6 +902,10 @@ class H3RefModApplySimple(io.ComfyNode):
                     types=[io.Custom("H3_REFMOD"), io.Custom("H3_REF_MODS")],
                     optional=True,
                     tooltip="A single RefMod or a bundle of RefMods to inject. Leave unconnected to bypass unchanged."),
+                io.Boolean.Input("use_video", default=True,
+                    tooltip="Apply the visual latent from each RefMod. Turn this off to use only embedded audio."),
+                io.Boolean.Input("use_audio", default=True,
+                    tooltip="Apply the embedded audio latent from each RefMod when present. Turn this off for visual-only application."),
                 io.Float.Input("strength", default=1.0, min=0.0, max=1.0, step=0.01,
                     tooltip="Master reference strength. For identity work this is the main "
                             "dial: higher = tighter identity lock, lower = more freedom but "
@@ -904,11 +918,15 @@ class H3RefModApplySimple(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, conditioning, mods, strength=1.0):
+    def execute(cls, conditioning, mods, use_video=True, use_audio=True, strength=1.0):
         if mods is None:
             print("[H3RefModApplySimple] no mods connected — bypassing conditioning unchanged")
             return io.NodeOutput(conditioning)
-        blocks = _ref_blocks(mods, strength, ("constant", "linear", 1.0), seed=-1)
+        if not use_video and not use_audio:
+            print("[H3RefModApplySimple] use_video=False and use_audio=False — bypassing conditioning unchanged")
+            return io.NodeOutput(conditioning)
+        blocks = _ref_blocks(mods, strength, ("constant", "linear", 1.0), seed=-1,
+                             use_video=bool(use_video), use_audio=bool(use_audio))
         if isinstance(conditioning, list):
             out = []
             for t in conditioning:

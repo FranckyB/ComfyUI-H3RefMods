@@ -603,7 +603,8 @@ class H3RefMod:
     # ── native ref block ──────────────────────────────────────────────
 
     def ref_block(self, strength: float = 1.0,
-                  curve=None) -> Optional[Dict]:
+                  curve=None, use_video: bool = True,
+                  use_audio: bool = True) -> Optional[Dict]:
         """
         Build the ref block dict the model's ``PackedLayout`` / payload consumes.
 
@@ -630,7 +631,16 @@ class H3RefMod:
         so the ref can fade in/out across the video.  A flat curve is
         identical to passing ``strength`` alone.
         """
-        if strength <= 0.0:
+        if strength <= 0.0 or (not use_video and not use_audio):
+            return None
+        has_audio = use_audio and self.audio_latent is not None and self.ref_audio_t > 0
+        if not use_video:
+            if has_audio:
+                return {
+                    "kind": "audio",
+                    "ref_audio_t": self.ref_audio_t,
+                    "audio_latent": self.audio_latent,
+                }
             return None
         latent = self.latent
         if curve is not None and self.latent_t > 1:
@@ -650,7 +660,6 @@ class H3RefMod:
             "latent_w": self.latent_w,
             "latent": latent,
         }
-        has_audio = self.audio_latent is not None and self.ref_audio_t > 0
         if self.kind == "video" or has_audio:
             # The DiT only reads audio off video / video_audio / audio blocks —
             # its "image" branch ignores audio_latent.  So a mod carrying audio
