@@ -25,6 +25,7 @@ so they actually run standalone, without anything connected downstream.
 from __future__ import annotations
 
 import os
+import shutil
 from typing import List, Optional
 
 import torch
@@ -39,6 +40,7 @@ from ..py.refmod_common import (
     refmods_dir,
 )
 from ..py.refmod_core import (
+    AUDIO_CONCEPT_TYPES,
     CONCEPT_TYPES,
     H3RefMod,
     aspect_grid,
@@ -66,6 +68,18 @@ from .refmod_apply import (
 )
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".aac", ".m4a", ".ogg", ".opus"}
+THUMB_TARGET_ASPECT = 3.0 / 4.0
+THUMB_ASPECT_TOLERANCE = 0.02
+
+
+def _auto_folder_description(folder: str, concept_type: str) -> str:
+    """Default metadata description for folder-generated RefMods."""
+    folder_label = os.path.basename(os.path.normpath(folder)) or "refmod"
+    if concept_type == "identity":
+        return f"{folder_label} persona reference mod"
+    if concept_type and concept_type != "generic":
+        return f"{folder_label} {concept_type} reference mod"
+    return f"{folder_label} reference mod"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -83,6 +97,54 @@ def _scan_folder(folder: str) -> "tuple[List[str], List[str], List[str]]":
                 if os.path.isfile(p):
                     audios.append(p)
     return images, videos, audios
+
+
+def _image_size(path: str) -> "tuple[int, int]":
+    from PIL import Image
+
+    with Image.open(path) as img:
+        return img.size
+
+
+def _is_preferred_thumb_aspect(width: int, height: int) -> bool:
+    if width <= 0 or height <= 0:
+        return False
+    return abs((width / float(height)) - THUMB_TARGET_ASPECT) <= THUMB_ASPECT_TOLERANCE
+
+
+def _choose_thumb_source(images: List[str]) -> Optional[str]:
+    """Prefer a 3:4 image; otherwise use the largest image. Stable on ties."""
+    ranked = []
+    for idx, path in enumerate(images):
+        try:
+            width, height = _image_size(path)
+        except Exception:
+            continue
+        ranked.append((
+            0 if _is_preferred_thumb_aspect(width, height) else 1,
+            -(width * height),
+            idx,
+            path,
+        ))
+    if not ranked:
+        return None
+    ranked.sort()
+    return ranked[0][3]
+
+
+def _copy_refmod_thumbnail(images: List[str], path_no_ext: str) -> None:
+    """Copy a representative source image beside the saved RefMod."""
+    thumb_src = _choose_thumb_source(images)
+    if not thumb_src:
+        return
+    ext = os.path.splitext(thumb_src)[1].lower()
+    thumb_dst = path_no_ext + ext
+    shutil.copy2(thumb_src, thumb_dst)
+    print(f"[H3RefModCreateFromFolder] thumbnail {os.path.basename(thumb_src)} -> {thumb_dst}")
+
+
+def _latent_token_count(latent: torch.Tensor) -> int:
+    return int(latent.shape[2]) * (int(latent.shape[3]) // 2) * (int(latent.shape[4]) // 2)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -171,6 +233,7 @@ def _create_mod_from_folder(
     name: str,
     mode: str,
     concept_type: str,
+    audio_concept_type: str,
     vae,
     audio_vae=None,
     ref_resolution: int = 1024,
@@ -180,10 +243,12 @@ def _create_mod_from_folder(
     description: str = "",
     save_dir: str = "",
     save: bool = True,
+    budget_policy: str = "truncate",
 ) -> H3RefMod:
     """Create (and optionally save) a single RefMod from one folder."""
     name = _sanitize_name(name)
     mode = normalize_mode(mode)
+    description = (description or "").strip() or _auto_folder_description(folder, concept_type)
 
     images, videos, audios = _scan_folder(folder)
     if not images and not videos:
@@ -271,6 +336,14 @@ def _create_mod_from_folder(
         pbar.update_absolute(idx + 1)
 
     latent = torch.cat(frames, dim=2)
+    if max_tokens > 0 and budget_policy == "error":
+        tokens = _latent_token_count(latent)
+        if tokens > max_tokens:
+            raise ValueError(
+                f"H3RefModCreateFromFolder: extracted {tokens} visual tokens, which exceeds "
+                f"max_tokens={max_tokens}. Increase the budget, reduce frames/resolution, "
+                "or switch budget_policy to 'truncate'."
+            )
     if max_tokens > 0:
         latent = fit_token_budget(latent, max_tokens, name)
     total_t = latent.shape[2]
@@ -291,9 +364,11 @@ def _create_mod_from_folder(
               if mode == "encode" else f"{total_t}x{gh}x{gw}"),
         optimize_steps=int(identity) if mode == "training" else 0,
         tags=[f"{n_img} img, {n_vid} vid"]
-             + ([f"{ref_audio_t} audio"] if ref_audio_t > 0 else []),
-        description=(description or "").strip(),
+               + ([f"{ref_audio_t} audio"] if ref_audio_t > 0 else [])
+               + ([f"audio:{audio_concept_type}"] if ref_audio_t > 0 else []),
+           description=description,
         concept_type=concept_type,
+           audio_concept_type=audio_concept_type if ref_audio_t > 0 else "",
         audio_latent=audio_latent,
         ref_audio_t=ref_audio_t,
     )
@@ -307,6 +382,7 @@ def _create_mod_from_folder(
                   f"overwritten).")
             mod.name = saved_name
         path = mod.save(path_no_ext)
+        _copy_refmod_thumbnail(images, path_no_ext)
         _MOD_CACHE[saved_name] = mod
         if len(_MOD_CACHE) > _MOD_CACHE_MAX:
             _MOD_CACHE.pop(next(iter(_MOD_CACHE)))
@@ -346,9 +422,10 @@ class H3RefModCreateFromFolder(io.ComfyNode):
             category="H3RefMod",
             description="Scan a dataset folder for reference images/videos/audio and "
                         "create a RefMod (.safetensors). Defaults to an 'identity' "
-                        "concept in 'encode' mode — the right choice for a person/"
+                        "concept in 'Full Reference' mode — the right choice for a person/"
                         "character. Audio files in the folder are embedded as the mod's "
-                        "voice (needs the audio VAE). Saves to models/refmods/ by default.",
+                        "voice (needs the audio VAE). Saves to models/refmods/ by default, "
+                        "and copies a thumbnail from the best source image.",
             inputs=[
                 io.String.Input("folder", default="",
                     tooltip="Dataset folder with reference images/videos/audio. REQUIRED — "
@@ -359,18 +436,26 @@ class H3RefModCreateFromFolder(io.ComfyNode):
                     tooltip="When ON, the folder input is treated as a parent directory: "
                             "every immediate subfolder is scanned and turned into its own "
                             "RefMod, named after the subfolder. The 'name' input is ignored "
-                            "in this mode. Great for batch-processing a dataset of concepts."),
-                io.String.Input("name", default="my_concept",
+                            "in this mode, and the description is auto-generated from each "
+                            "subfolder name. Great for batch-processing a dataset of concepts."),
+                io.String.Input("name", default="name_refMod",
                     tooltip="Saved mod name (appears in the Load H3 RefMods dropdown after a "
                             "reload)."),
                 io.Combo.Input("concept_type", options=list(CONCEPT_TYPES), default="identity",
                     tooltip="What this mod represents. 'identity' (default) = a specific "
                             "person/character; also pose_motion, clothing, background, style, "
-                            "generic."),
-                io.Combo.Input("mode", options=["encode", "training"], default="encode",
-                    tooltip="'encode' (default) = full-res VAE encode, max identity (~1K "
-                            "tokens/img) — recommended for people. 'training' = pooled grid "
-                            "refined by 'identity' steps — cheaper, concept/motion only."),
+                            "generic. Audio-style labels are also accepted for compatibility with "
+                            "upstream RefMods, but visual concepts should usually stay on identity/"
+                            "pose_motion/clothing/background/style."),
+                io.Combo.Input("audio_concept_type", options=list(AUDIO_CONCEPT_TYPES), default="voice",
+                    tooltip="How to label embedded audio in this RefMod. Matches upstream audio "
+                            "concept labels: voice (default), singing, music_style, sound_fx, "
+                            "ambience."),
+                io.Combo.Input("mode", options=["Full Reference", "Compressed Reference", "encode", "training"], default="Full Reference",
+                    tooltip="'Full Reference' (default) = full-res VAE encode, max identity (~1K "
+                            "tokens/img) — recommended for people. 'Compressed Reference' = pooled grid "
+                            "refined by 'Refinement Steps' — cheaper, concept/motion only. Legacy "
+                            "'encode'/'training' values remain accepted."),
                 io.Vae.Input("vae",
                     tooltip="The MiniMax H3 video VAE."),
                 io.Vae.Input("audio_vae", optional=True,
@@ -382,19 +467,26 @@ class H3RefModCreateFromFolder(io.ComfyNode):
                 io.Int.Input("max_tokens", default=8192, min=0, max=65536, step=512,
                     tooltip="Hard cap on total injected tokens (0 = no cap). Near-duplicate "
                             "frames dropped first, then resampled to fit."),
-                io.Int.Input("identity", default=500, min=0, max=2000, step=50,
-                    tooltip="Training mode only: gradient refinement steps (0 = pure pooling)."),
+                io.Int.Input("identity", display_name="Refinement Steps", default=500, min=0, max=2000, step=50,
+                    tooltip="Compressed Reference only: gradient refinement steps (0 = pure pooling)."),
                 io.Int.Input("max_frames", default=240, min=2, max=4800, step=1,
                     tooltip="Video frames kept per video (uniformly sampled during decode)."),
                 io.String.Input("description", default="", multiline=True,
                     tooltip="Optional text describing the concept, stored in the mod and "
-                            "emitted by the loaders' prompt_hint output."),
+                        "emitted by the loaders' prompt_hint output. If left empty, "
+                        "Create From Folder auto-generates one from the folder name. "
+                        "In subfolder mode this field is ignored and each subfolder gets "
+                        "its own auto-generated description. A thumbnail is also copied "
+                        "from the source images: 3:4 images first, otherwise the largest one."),
                 io.String.Input("save_dir", default="models/refmods/", optional=True,
                     tooltip="Where to save the mod. Empty = ComfyUI models/refmods/ (default, "
                             "recommended so the loaders find it). Set a path to save elsewhere. "
                             "If a mod with this name already exists there, it is never "
                             "overwritten — the save name gets '_2', '_3', etc. appended instead "
                             "(the console prints the final name used)."),
+                io.Combo.Input("budget_policy", options=["truncate", "error"], default="truncate",
+                    tooltip="On max_tokens overflow: truncate uses the existing frame reduction; "
+                            "error stops without saving. 0 max_tokens disables the cap."),
                 io.Boolean.Input("save", default=True, label_on="save", label_off="don't save",
                     tooltip="Save the mod to disk so Load H3 RefMods can pick it up later."),
             ],
@@ -409,9 +501,10 @@ class H3RefModCreateFromFolder(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, folder, name, mode, concept_type, vae, audio_vae=None,
+    def execute(cls, folder, name, mode, concept_type, audio_concept_type, vae, audio_vae=None,
                 ref_resolution=1024, max_tokens=8192, identity=500, max_frames=240,
-                description="", save_dir="", save=True, use_subfolders=False) -> io.NodeOutput:
+                description="", save_dir="", budget_policy="truncate", save=True,
+                use_subfolders=False) -> io.NodeOutput:
         from .refmod_apply import _resolve_folder
         if not (folder or "").strip().strip('"'):
             raise ValueError(
@@ -435,19 +528,21 @@ class H3RefModCreateFromFolder(io.ComfyNode):
             mods = []
             for sub in subfolders:
                 sub_name = _sanitize_name(os.path.basename(sub))
+                if 'refmod' not in sub_name.lower():
+                    sub_name = f"{sub_name}_refMod"
                 mod = _create_mod_from_folder(
-                    sub, sub_name, mode, concept_type, vae, audio_vae,
+                    sub, sub_name, mode, concept_type, audio_concept_type, vae, audio_vae,
                     ref_resolution, max_tokens, identity, max_frames,
-                    description, save_dir, save,
+                    _auto_folder_description(sub, concept_type), save_dir, save, budget_policy,
                 )
                 mods.append((mod, 1.0))
             return io.NodeOutput(mods)
 
         name = _sanitize_name(name)
         mod = _create_mod_from_folder(
-            folder, name, mode, concept_type, vae, audio_vae,
+            folder, name, mode, concept_type, audio_concept_type, vae, audio_vae,
             ref_resolution, max_tokens, identity, max_frames,
-            description, save_dir, save,
+            description, save_dir, save, budget_policy,
         )
         return io.NodeOutput([(mod, 1.0)])
 

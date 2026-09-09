@@ -61,8 +61,15 @@ CONCEPT_TYPES = (
     "pose_motion",   # a pose, dance, gesture, camera move
     "clothing",      # an outfit / garment, decoupled from who's wearing it
     "background",    # environment / set / location plate
+    "voice",
+    "singing",
+    "music_style",
+    "sound_fx",
+    "ambience",
     "style",         # look/grade/animation style, not a concrete subject
 )
+
+AUDIO_CONCEPT_TYPES = ("voice", "singing", "music_style", "sound_fx", "ambience")
 
 
 def _blur_latent(z: torch.Tensor, factor: int = 8) -> torch.Tensor:
@@ -119,7 +126,12 @@ def read_refmod_meta(path_no_ext: str) -> Optional[Dict]:
 # Latent compression
 # ═══════════════════════════════════════════════════════════════════════════
 
-MODE_ALIASES = {"full": "encode", "pooled": "training"}
+MODE_ALIASES = {
+    "full": "encode",
+    "pooled": "training",
+    "Full Reference": "encode",
+    "Compressed Reference": "training",
+}
 
 
 def normalize_mode(mode: str) -> str:
@@ -504,6 +516,7 @@ class H3RefMod:
     tags: List[str] = field(default_factory=list)
     description: str = ""     # optional text describing the concept (emitted by the loaders)
     concept_type: str = "generic"  # what this mod represents; see CONCEPT_TYPES above
+    audio_concept_type: str = ""   # upstream-style audio role label for embedded audio, if present
     # Optional audio identity: the audio-VAE latent [1, 32, 2, ref_audio_t] and
     # its frame count.  When present the mod is emitted as a "video_audio" (or
     # standalone "audio") ref block so the DiT attends to the soundtrack too.
@@ -606,8 +619,9 @@ class H3RefMod:
             "tags": self.tags,
             "description": self.description,
             "concept_type": self.concept_type,
+            "audio_concept_type": self.audio_concept_type,
             "ref_audio_t": self.ref_audio_t,
-            "_format_version": 2,
+            "_format_version": 3,
         }
         tensors = {"latent": self.latent.contiguous()}
         if self.audio_latent is not None and self.ref_audio_t > 0:
@@ -644,6 +658,9 @@ class H3RefMod:
             tags=list(meta.get("tags", [])),
             description=str(meta.get("description", "") or ""),
             concept_type=str(meta.get("concept_type", "generic") or "generic"),
+            audio_concept_type=str(
+                meta.get("audio_concept_type", "voice" if "audio_latent" in all_tensors else "") or ""
+            ),
             audio_latent=audio_latent,
             ref_audio_t=int(meta.get("ref_audio_t", 0)),
         )

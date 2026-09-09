@@ -486,6 +486,7 @@ def _info_lines(mod: H3RefMod) -> List[str]:
         "=" * 52,
         f"  MiniMax H3 RefMod: {mod.name}",
         f"  {'concept_type':<18} {mod.concept_type}",
+        f"  {'audio_concept_type':<18} {mod.audio_concept_type or '-'}",
         f"  {'mode':<18} {mod.mode}",
         f"  {'kind':<18} {mod.kind}",
         f"  {'latent':<18} {tuple(mod.latent.shape)}",
