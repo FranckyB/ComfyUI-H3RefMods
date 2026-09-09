@@ -55,10 +55,10 @@ from ..py.refmod_core import (
     optimize_latent_multi,
     pool_latent,
 )
-from ..py.h3_vae_loader import load_h3_vaes_from_av_encoder
+from ..py.refmod_vae_loader import load_h3_vaes_from_av_encoder
 # reuse the encode helpers shared with the loader/mods-listing side of the pack
-from . import refmod_apply as _nodes_mod  # the pack's own nodes.py (for _MOD_LIST_CACHE_KEY)
-from .refmod_apply import (
+from . import refmod_loader as _nodes_mod  # loader-side cache/list refresh
+from .refmod_loader import (
     _MOD_CACHE,
     _MOD_CACHE_MAX,
 )

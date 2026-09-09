@@ -5,7 +5,6 @@ from typing import Dict, List, Tuple
 
 import server
 
-from .refmod_apply import _prompt_hint
 from ..py.refmod_browser import (
     PREVIEW_EXTS,
     browser_root,
@@ -13,7 +12,7 @@ from ..py.refmod_browser import (
     safe_file_path,
 )
 from ..py.refmod_core import H3RefMod
-
+from ..py.refmod_common import _prompt_hint
 
 _VISUAL_MOD_CACHE: Dict[str, H3RefMod] = {}
 _VISUAL_MOD_CACHE_MAX = 24
@@ -129,7 +128,7 @@ class H3RefModVisualPicker:
 
 
 NODE_CLASS_MAPPINGS = {"H3RefModVisualPicker": H3RefModVisualPicker}
-NODE_DISPLAY_NAME_MAPPINGS = {"H3RefModVisualPicker": "Visual RefMod Picker"}
+NODE_DISPLAY_NAME_MAPPINGS = {"H3RefModVisualPicker": "Visual H3 RefMod Picker"}
 
 
 @server.PromptServer.instance.routes.get("/h3refmods/refmod-browser/root")

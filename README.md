@@ -15,6 +15,7 @@ This fork aims make character work simpler, with faster picking, simpler apply f
 - `Load RefMod` and `Load RefMod Stack` loads one or more saved RefMods for reuse.
 - `Apply H3 RefMod` is the streamlined apply node for the usual identity case, using a flat full-length reference curve.
 - `Apply H3 RefMod Advanced` keeps the fuller timing and shaping controls for more deliberate modulation.
+- `Apply H3 RefMod Axis` lets you feed in two `Visual RefMod Picker` selections and treat them like a signed slider for video and audio independently: negative values select A, positive values select B, and `0` means no effect for that channel.
 - `H3 RefMod Step Curve` shapes reference strength across denoising steps rather than across the video timeline.
 
 ## Notes

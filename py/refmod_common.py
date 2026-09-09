@@ -135,3 +135,38 @@ def load_video_file(path: str, max_frames: int = 240,
         idx = torch.linspace(0, n - 1, max_frames).round().long()
         frames = frames[idx]
     return frames
+
+def _prompt_hint(loads) -> str:
+    """Merge loaded mods' concept_type + description into one prompt-ready string.
+
+    e.g. "identity: ginger woman, tattooed neck, black lipstick; pose_motion:
+    slow twirl into camera, hair whipping". Concat this onto your positive
+    prompt (a string-concat node ahead of CLIP Text Encode) instead of
+    retyping each mod's description by hand. Mods with no description are
+    skipped — a bare concept_type with nothing to say isn't a useful clue.
+    """
+    parts = []
+    for mod, _strength in loads:
+        if mod.description:
+            parts.append(f"{mod.concept_type}: {mod.description}")
+    return "; ".join(parts)
+
+def _info_lines(mod):
+    opt = mod.optimize_steps
+    if mod.mode == "encode":
+        opt = f"n/a ({mod.optimize_steps} — encode mode stores the actual encode)"
+    return [
+        "=" * 52,
+        f"  MiniMax H3 RefMod: {mod.name}",
+        f"  {'concept_type':<18} {mod.concept_type}",
+        f"  {'mode':<18} {mod.mode}",
+        f"  {'kind':<18} {mod.kind}",
+        f"  {'latent':<18} {tuple(mod.latent.shape)}",
+        f"  {'tokens injected':<18} {mod.token_count}",
+        f"  {'source':<18} {mod.source} ({mod.source_shape})",
+        f"  {'pool':<18} {mod.pool}",
+        f"  {'identity':<18} {opt}",
+        f"  {'tags':<18} {', '.join(mod.tags) if mod.tags else '-'}",
+        f"  {'description':<18} {mod.description or '-'}",
+        "=" * 52,
+    ]
