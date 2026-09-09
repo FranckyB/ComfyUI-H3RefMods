@@ -90,8 +90,16 @@ def _blur_latent(z: torch.Tensor, factor: int = 8) -> torch.Tensor:
     manifold (smooth, plausible) while still discarding detail as strength
     drops, which is what "weaker reference" should actually look like.
     """
+    if z.dim() == 4:
+        b, c, stereo, t = z.shape
+        if t <= 1:
+            return z
+        flat = z.reshape(b * c * stereo, 1, t).float()
+        down = F.adaptive_avg_pool1d(flat, max(1, t // factor))
+        up = F.interpolate(down, size=t, mode="linear", align_corners=False)
+        return up.reshape_as(z).to(z.dtype)
     if z.dim() != 5:
-        return z
+        raise ValueError(f"Unsupported RefMod latent shape: {tuple(z.shape)}")
     t, h, w = z.shape[2], z.shape[3], z.shape[4]
     sh, sw = max(1, h // factor), max(1, w // factor)
     down = F.adaptive_avg_pool3d(z.float(), (t, sh, sw))
@@ -585,10 +593,20 @@ class H3RefMod:
     # standalone "audio") ref block so the DiT attends to the soundtrack too.
     audio_latent: Optional[torch.Tensor] = None
     ref_audio_t: int = 0
+    sample_rate: int = 32000
 
     def __post_init__(self):
+        if self.kind == "audio":
+            if self.latent.ndim != 4 or tuple(self.latent.shape[:3]) != (1, 32, 2) or self.latent.shape[-1] < 1:
+                raise ValueError("H3 audio RefMod must contain [1,32,2,T] with T >= 1.")
+            self.latent_t = int(self.latent.shape[-1])
+            self.latent_h = 0
+            self.latent_w = 0
+            self.audio_latent = None
+            self.ref_audio_t = 0
+            return
         if self.kind not in ("image", "video"):
-            raise ValueError(f"kind must be 'image' or 'video' (got {self.kind!r})")
+            raise ValueError(f"kind must be 'image', 'video' or 'audio' (got {self.kind!r})")
         if self.kind == "image":
             self.latent_t = 1
 
@@ -597,6 +615,8 @@ class H3RefMod:
     @property
     def token_count(self) -> int:
         """Number of patchified tokens the mod injects into the packed sequence."""
+        if self.kind == "audio":
+            return 2 * self.latent_t
         per_frame = (self.latent_h // 2) * (self.latent_w // 2)
         return self.latent_t * per_frame
 
@@ -633,6 +653,23 @@ class H3RefMod:
         """
         if strength <= 0.0 or (not use_video and not use_audio):
             return None
+        if self.kind == "audio":
+            if not use_audio:
+                return None
+            latent = self.latent
+            strengths = curve_strengths(curve, self.latent_t) if curve is not None else None
+            if strengths is not None:
+                weights = [max(0.0, min(1.0, strength * value)) for value in strengths]
+                if any(value < 1.0 for value in weights):
+                    st = latent.new_tensor(weights).view(1, 1, 1, self.latent_t)
+                    latent = st * latent + (1.0 - st) * _blur_latent(latent)
+            elif strength < 1.0:
+                latent = strength * latent + (1.0 - strength) * _blur_latent(latent)
+            return {
+                "kind": "audio",
+                "ref_audio_t": self.latent_t,
+                "audio_latent": latent,
+            }
         has_audio = use_audio and self.audio_latent is not None and self.ref_audio_t > 0
         if not use_video:
             if has_audio:
@@ -693,6 +730,7 @@ class H3RefMod:
             "concept_type": self.concept_type,
             "audio_concept_type": self.audio_concept_type,
             "ref_audio_t": self.ref_audio_t,
+            "sample_rate": self.sample_rate,
             "_format_version": 3,
         }
         tensors = {"latent": self.latent.contiguous()}
@@ -719,9 +757,9 @@ class H3RefMod:
             name=meta.get("name", os.path.basename(path_no_ext)),
             kind=meta.get("kind", "image"),
             latent=latent,
-            latent_h=int(meta.get("latent_h", latent.shape[3])),
-            latent_w=int(meta.get("latent_w", latent.shape[4])),
-            latent_t=int(meta.get("latent_t", latent.shape[2])),
+            latent_h=int(meta.get("latent_h", latent.shape[3] if latent.ndim == 5 else 0)),
+            latent_w=int(meta.get("latent_w", latent.shape[4] if latent.ndim == 5 else 0)),
+            latent_t=int(meta.get("latent_t", latent.shape[2] if latent.ndim == 5 else latent.shape[-1])),
             mode=normalize_mode(meta.get("mode", "training")),
             source=meta.get("source", ""),
             source_shape=meta.get("source_shape", ""),
@@ -735,5 +773,6 @@ class H3RefMod:
             ),
             audio_latent=audio_latent,
             ref_audio_t=int(meta.get("ref_audio_t", 0)),
+            sample_rate=int(meta.get("sample_rate", 32000)),
         )
 

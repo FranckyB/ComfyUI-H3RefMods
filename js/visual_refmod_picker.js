@@ -16,6 +16,10 @@ function basenameForDisplay(value) {
     return i >= 0 ? normalized.substring(i + 1) : normalized;
 }
 
+function entryDisplayName(entry) {
+    return String(entry?.name || basenameForDisplay(entry?.path || "") || "");
+}
+
 function dirnameForPath(value) {
     const normalized = String(value || "").replace(/\\/g, "/").replace(/\/+$/, "");
     const i = normalized.lastIndexOf("/");
@@ -343,7 +347,7 @@ function createRefModBrowserModal(initialPath, onSelect) {
         `;
         imageBox.appendChild(img);
         const title = document.createElement("div");
-        title.textContent = basenameForDisplay(entry.path || entry.name);
+        title.textContent = entryDisplayName(entry);
         title.style.cssText = `
             font-size: 12px;
             color: #ccc;
@@ -352,7 +356,7 @@ function createRefModBrowserModal(initialPath, onSelect) {
             text-overflow: ellipsis;
             text-align: center;
         `;
-        title.title = basenameForDisplay(entry.path || entry.name);
+        title.title = entryDisplayName(entry);
         card.append(imageBox, title);
         const selectedPath = state.selectedPath;
         setCardSelected(card, !!selectedPath && pathsEqual(selectedPath, entry.path));
@@ -452,6 +456,7 @@ app.registerExtension({
 
             const modPathWidget = node.widgets?.find((w) => w.name === "mod_path");
             const strengthWidget = node.widgets?.find((w) => w.name === "strength");
+            const audioStrengthWidget = node.widgets?.find((w) => w.name === "audio_strength");
 
             const panel = document.createElement("div");
             panel.style.cssText = `
@@ -524,9 +529,10 @@ app.registerExtension({
             domWidget.getHeight = () => "100%";
 
             const strengthWidgetIndex = node.widgets.indexOf(strengthWidget);
+            const audioStrengthWidgetIndex = node.widgets.indexOf(audioStrengthWidget);
             const numericStrengthWidget = node.addWidget(
                 "number",
-                "strength",
+                "video_strength",
                 strengthWidget?.value != null ? Number(strengthWidget.value) : 1.0,
                 (v) => {
                     if (strengthWidget) strengthWidget.value = Number(v);
@@ -541,6 +547,23 @@ app.registerExtension({
             );
             numericStrengthWidget.serialize = false;
 
+            const numericAudioStrengthWidget = node.addWidget(
+                "number",
+                "audio_strength",
+                audioStrengthWidget?.value != null ? Number(audioStrengthWidget.value) : 1.0,
+                (v) => {
+                    if (audioStrengthWidget) audioStrengthWidget.value = Number(v);
+                    node.setDirtyCanvas(true, true);
+                },
+                {
+                    min: audioStrengthWidget?.options?.min != null ? Number(audioStrengthWidget.options.min) : 0,
+                    max: audioStrengthWidget?.options?.max != null ? Number(audioStrengthWidget.options.max) : 1,
+                    step: audioStrengthWidget?.options?.step != null ? Number(audioStrengthWidget.options.step) : 0.01,
+                    precision: 2,
+                }
+            );
+            numericAudioStrengthWidget.serialize = false;
+
             const normalizedStrengthValue = (value, fallback = 1.0) => {
                 const parsed = Number(value);
                 return Number.isFinite(parsed) ? parsed : fallback;
@@ -553,6 +576,13 @@ app.registerExtension({
                 if (strengthWidget) strengthWidget.value = next;
             };
 
+            const syncNumericAudioStrength = () => {
+                const fallback = normalizedStrengthValue(numericAudioStrengthWidget?.value, 1.0);
+                const next = normalizedStrengthValue(audioStrengthWidget?.value, fallback);
+                numericAudioStrengthWidget.value = next;
+                if (audioStrengthWidget) audioStrengthWidget.value = next;
+            };
+
             if (strengthWidget) {
                 const originalStrengthCb = strengthWidget.callback;
                 strengthWidget.callback = function () {
@@ -560,9 +590,18 @@ app.registerExtension({
                     if (originalStrengthCb) return originalStrengthCb.apply(this, arguments);
                 };
             }
+            if (audioStrengthWidget) {
+                const originalAudioStrengthCb = audioStrengthWidget.callback;
+                audioStrengthWidget.callback = function () {
+                    syncNumericAudioStrength();
+                    if (originalAudioStrengthCb) return originalAudioStrengthCb.apply(this, arguments);
+                };
+            }
             syncNumericStrength();
+            syncNumericAudioStrength();
 
             if (strengthWidget) hideWidget(strengthWidget);
+            if (audioStrengthWidget) hideWidget(audioStrengthWidget);
             if (modPathWidget) hideWidget(modPathWidget);
 
             let filePickerWidget = node.addWidget(
@@ -610,7 +649,7 @@ app.registerExtension({
                 const map = { "(none)": null };
                 const used = new Set(labels);
                 for (const entry of data.mods || []) {
-                    const base = basenameForDisplay(entry.path || entry.name) || entry.name;
+                    const base = entryDisplayName(entry) || entry.name;
                     let label = base;
                     let idx = 2;
                     while (used.has(label)) {
@@ -668,6 +707,13 @@ app.registerExtension({
                     node.widgets.splice(strengthWidgetIndex + 1, 0, numericStrengthWidget);
                 }
             }
+            if (audioStrengthWidgetIndex >= 0 && numericAudioStrengthWidget) {
+                const numericAudioIndex = node.widgets.indexOf(numericAudioStrengthWidget);
+                if (numericAudioIndex >= 0) {
+                    node.widgets.splice(numericAudioIndex, 1);
+                    node.widgets.splice(audioStrengthWidgetIndex + 1, 0, numericAudioStrengthWidget);
+                }
+            }
 
             clickCatcher.addEventListener("click", async (event) => {
                 event.stopPropagation();
@@ -682,6 +728,13 @@ app.registerExtension({
                         normalizedStrengthValue(strengthWidget.value, 1.0)
                     );
                     numericStrengthWidget.value = strengthWidget.value;
+                }
+                if (audioStrengthWidget && numericAudioStrengthWidget) {
+                    audioStrengthWidget.value = normalizedStrengthValue(
+                        numericAudioStrengthWidget.value,
+                        normalizedStrengthValue(audioStrengthWidget.value, 1.0)
+                    );
+                    numericAudioStrengthWidget.value = audioStrengthWidget.value;
                 }
                 return originalSerialize ? originalSerialize.apply(this, arguments) : undefined;
             };
@@ -712,16 +765,28 @@ app.registerExtension({
             node.onConfigure = async function (info) {
                 node.properties._configuredFromWorkflow = true;
                 const res = onConfigure?.apply(this, arguments);
-                if (info && info.widgets_values && strengthWidget) {
-                    const idx = this.widgets.indexOf(strengthWidget);
-                    if (idx >= 0 && info.widgets_values[idx] !== undefined && info.widgets_values[idx] !== null) {
-                        strengthWidget.value = normalizedStrengthValue(info.widgets_values[idx], 1.0);
+                if (info && info.widgets_values) {
+                    if (strengthWidget) {
+                        const idx = this.widgets.indexOf(strengthWidget);
+                        if (idx >= 0 && info.widgets_values[idx] !== undefined && info.widgets_values[idx] !== null) {
+                            strengthWidget.value = normalizedStrengthValue(info.widgets_values[idx], 1.0);
+                        }
+                    }
+                    if (audioStrengthWidget) {
+                        const idx = this.widgets.indexOf(audioStrengthWidget);
+                        if (idx >= 0 && info.widgets_values[idx] !== undefined && info.widgets_values[idx] !== null) {
+                            audioStrengthWidget.value = normalizedStrengthValue(info.widgets_values[idx], 1.0);
+                        }
                     }
                 }
                 if (strengthWidget && !Number.isFinite(Number(strengthWidget.value))) {
                     strengthWidget.value = 1.0;
                 }
+                if (audioStrengthWidget && !Number.isFinite(Number(audioStrengthWidget.value))) {
+                    audioStrengthWidget.value = 1.0;
+                }
                 syncNumericStrength();
+                syncNumericAudioStrength();
 
                 const restoredPath = modPathWidget?.value || node.properties?._vrpModPath || "";
                 const restoredDir = node.properties?._vrpModDir || dirnameForPath(restoredPath);
@@ -738,6 +803,7 @@ app.registerExtension({
 
             setTimeout(async () => {
                 syncNumericStrength();
+                syncNumericAudioStrength();
                 const initialPath = modPathWidget?.value || node.properties?._vrpModPath || "";
                 const dir = node.properties?._vrpModDir || dirnameForPath(initialPath) || await getRefModsRoot();
                 node.properties._vrpModDir = dir;

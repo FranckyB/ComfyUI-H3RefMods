@@ -36,7 +36,6 @@ from dataclasses import replace
 from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 
 import comfy.patcher_extension
 import comfy.utils
@@ -70,6 +69,7 @@ _MOD_CACHE: Dict[str, H3RefMod] = {}
 _MOD_CACHE_MAX = 24          # cap: never pin more mods in RAM than this (FIFO eviction)
 _MOD_LIST_CACHE_KEY = None   # (dirs, mtimes, sizes) signature of the last _list_mod_names() scan
 _MOD_LIST_CACHE_VAL = None
+_MOD_SKIP_DIRS = {"graph_presets", ".git", "__pycache__"}
 
 # Mod storage lives in ComfyUI's models/ tree (created on first run) and is
 # registered as a first-class folder type so it shows up next to loras/unet.
@@ -102,6 +102,18 @@ def _mod_search_dirs() -> List[str]:
     return dirs
 
 
+def _iter_mod_paths(base_dir: str):
+    """Yield ``(relative_stem, absolute_stem)`` for RefMods under ``base_dir``."""
+    for root, dirnames, filenames in os.walk(base_dir):
+        dirnames[:] = sorted(d for d in dirnames if d not in _MOD_SKIP_DIRS)
+        for fn in sorted(filenames):
+            if not fn.endswith(".safetensors"):
+                continue
+            abs_stem = os.path.join(root, fn[:-len(".safetensors")])
+            rel_stem = os.path.relpath(abs_stem, base_dir).replace(os.sep, "/")
+            yield rel_stem, abs_stem
+
+
 def _list_mod_names() -> List[str]:
     """Available RefMod names across the search dirs (for the loader dropdown).
 
@@ -118,12 +130,10 @@ def _list_mod_names() -> List[str]:
     for d in _mod_search_dirs():
         if not os.path.isdir(d):
             continue
-        for fn in sorted(os.listdir(d)):
-            if not fn.endswith(".safetensors"):
-                continue
+        for rel_stem, abs_stem in _iter_mod_paths(d):
             try:
-                st = os.stat(os.path.join(d, fn))
-                sig.append(f"{fn}:{st.st_size}:{int(st.st_mtime)}")
+                st = os.stat(abs_stem + ".safetensors")
+                sig.append(f"{d}:{rel_stem}:{st.st_size}:{int(st.st_mtime)}")
             except OSError:
                 pass
     key = "\n".join(sig)
@@ -133,13 +143,10 @@ def _list_mod_names() -> List[str]:
     for d in _mod_search_dirs():
         if not os.path.isdir(d):
             continue
-        for fn in os.listdir(d):
-            if not fn.endswith(".safetensors"):
-                continue
-            stem = fn[:-len(".safetensors")]
-            meta = read_refmod_meta(os.path.join(d, stem))
-            if meta is not None and meta.get("kind") in ("image", "video"):
-                names.add(stem)
+        for rel_stem, abs_stem in _iter_mod_paths(d):
+            meta = read_refmod_meta(abs_stem)
+            if meta is not None and meta.get("kind") in ("image", "video", "audio"):
+                names.add(rel_stem)
     _MOD_LIST_CACHE_KEY, _MOD_LIST_CACHE_VAL = key, sorted(names)
     return _MOD_LIST_CACHE_VAL
 
@@ -245,217 +252,6 @@ def _save_graph_preset(name: str, spec, img=None) -> str:
     return safe
 
 
-def _resize_ref(image, short_edge: int, canvas=None):
-    """Aspect-preserving downscale (never upscale) to ``short_edge`` px; dims to /32.
-
-    When several refs are stacked into one mod they must share a single spatial
-    canvas, so ``canvas`` (tw, th) cover-crops each ref to it (like the official
-    node's follower keyframes).  Mirrors the official ref2video node: refs are
-    resized before VAE encode, so the stored latent rides the same
-    full-resolution path the model was trained with (the pooled path below is
-    the cheap "thumbnail" alternative).
-    """
-    h, w = image.shape[1], image.shape[2]
-    if h <= 0 or w <= 0:
-        raise ValueError(
-            f"_resize_ref: source has an empty frame ({h}x{w}) before any "
-            f"resize — the reference itself is invalid.")
-    scale = min(1.0, short_edge / min(h, w))
-    tw = max(32, round(w * scale / 32) * 32)
-    th = max(32, round(h * scale / 32) * 32)
-    crop = "disabled"
-    if canvas is not None:
-        tw, th = canvas
-        crop = "center"
-    if tw <= 0 or th <= 0:
-        raise ValueError(
-            f"_resize_ref: computed a zero-size resize target ({tw}x{th}) "
-            f"for a {h}x{w} source (short_edge={short_edge}, canvas={canvas}). "
-            f"This should be impossible — please report this shape.")
-    samples = image[..., :3].movedim(-1, 1)
-    samples = comfy.utils.common_upscale(samples, tw, th, "lanczos", crop)
-    if samples.shape[2] <= 0 or samples.shape[3] <= 0:
-        raise ValueError(
-            f"_resize_ref: common_upscale produced an empty result "
-            f"{tuple(samples.shape)} from a {h}x{w} source targeting "
-            f"{tw}x{th} (crop={crop}, canvas={canvas}). This points to a bug "
-            f"in comfy.utils.common_upscale for this input, not in RefMod's "
-            f"own math.")
-    return samples.movedim(1, -1)
-
-
-def _snap_to_causal_grid(n_frames: int) -> int:
-    """Round a video frame count down to the nearest valid ``4k + 1``.
-
-    MiniMax H3's video VAE is causal: it compresses time in groups of 4 with
-    one leading keyframe, so it only accepts pixel-frame counts of the form
-    4k+1 (1, 5, 9, 13, 17, ...). Anything else makes its internal temporal
-    chunker produce a zero-length chunk list and crash on
-    ``torch.cat(): expected a non-empty list of Tensors``. The official
-    ref2video path already trims to this grid before encoding; RefMod
-    extraction previously didn't, so an arbitrary frame_load_cap/
-    select_every_nth combo from a video loader would break it.
-    """
-    if n_frames <= 1:
-        return 1
-    return ((n_frames - 1) // 4) * 4 + 1
-
-
-def _ensure_min_size(image, floor: int = 320):
-    """Upscale (never downscale) so both spatial dims are >= ``floor`` px.
-
-    The MiniMax H3 VAE encodes with internal tiled_encode (~256px tiles). A
-    reference smaller than the tile size in one dimension can make the tiler
-    compute a zero-size edge tile, which crashes deep inside conv_in with a
-    cryptic 'Expected 4D or 5D... but got [1,3,1,0,W]' error. This applies
-    regardless of extraction mode ('encode' already resizes down to
-    ref_resolution but never guarantees a floor; 'training' now resizes to
-    the same cap, also without a floor), so it's a separate, unconditional
-    safety net right before encode.
-    """
-    import comfy.utils
-    h, w = image.shape[1], image.shape[2]
-    if h >= floor and w >= floor:
-        return image
-    scale = floor / min(h, w)
-    tw = max(floor, round(w * scale / 32) * 32)
-    th = max(floor, round(h * scale / 32) * 32)
-    samples = image[..., :3].movedim(-1, 1)
-    samples = comfy.utils.common_upscale(samples, tw, th, "lanczos", "disabled")
-    return samples.movedim(1, -1)
-
-
-def _normalize_mask_batch(mask, label: str = "mask") -> torch.Tensor:
-    """Canonicalize a MASK input to ``[N, H, W]`` float32 in [0, 1]."""
-    if mask is None:
-        return None
-    if not isinstance(mask, torch.Tensor):
-        raise ValueError(f"H3RefModExtract: {label} must be a MASK tensor, "
-                          f"got {type(mask)}")
-    if mask.dim() == 2:  # [H, W]
-        mask = mask.unsqueeze(0)
-    if mask.dim() != 3:
-        raise ValueError(f"H3RefModExtract: {label} has unexpected shape "
-                          f"{tuple(mask.shape)} (expected [H,W] or [N,H,W])")
-    return mask.float().clamp(0.0, 1.0)
-
-
-def _resize_mask(mask: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
-    """Resize a ``[T, H, W]`` mask to ``target_h x target_w`` (bilinear)."""
-    samples = mask.unsqueeze(1)  # [T, 1, H, W]
-    samples = comfy.utils.common_upscale(samples, target_w, target_h, "bilinear", "disabled")
-    return samples.squeeze(1).clamp(0.0, 1.0)
-
-
-def _blur_latent(z: torch.Tensor, factor: int = 8) -> torch.Tensor:
-    """Heavy spatial low-pass: downsample then upsample back.
-
-    Used as the suppression target instead of random noise. A VAE latent's
-    channels are correlated (it's not iid per-pixel noise in this space), so
-    feeding the model raw torch.randn() as a "suppressed" reference isn't
-    read as absence — it's read as real, garbled content, and gets rendered
-    as an actual (wrong) texture: the woven/static pattern is what
-    out-of-distribution noise looks like once a diffusion model tries to
-    make sense of it as a reference. A blurred copy of the real latent stays
-    on the manifold (smooth, plausible) while discarding the specific
-    structure (a skyline, a treeline) that was dictating unwanted content.
-    """
-    t, h, w = z.shape[2], z.shape[3], z.shape[4]
-    sh, sw = max(1, h // factor), max(1, w // factor)
-    down = F.adaptive_avg_pool3d(z.float(), (t, sh, sw))
-    up = F.interpolate(down, size=(t, h, w), mode="trilinear", align_corners=False)
-    return up
-
-
-def _mask_latent(z: torch.Tensor, mask_px: torch.Tensor, background_retention: float,
-                  seed_key: str) -> torch.Tensor:
-    """Suppress the latent outside ``mask_px`` toward a blurred copy of itself, per cell.
-
-    ``mask_px`` is pixel-space (already resized/cropped to match the encoded
-    source), 1 = keep, 0 = suppress; ``background_retention`` sets the floor
-    weight for suppressed regions (0 = fully blurred there, 1 = no
-    suppression at all). ``seed_key`` is unused now (kept for call-site
-    compatibility) — the suppression target is deterministic, not random.
-
-    ``z``: ``[1, 24, T, H, W]`` VAE latent. Downsamples ``mask_px`` to the
-    latent's ``H x W`` via average pooling (soft edges instead of a hard cut,
-    since the DiT patchifies in 2x2 cells anyway).
-    """
-    t, h, w = z.shape[2], z.shape[3], z.shape[4]
-    mp = mask_px.unsqueeze(1)  # [T_src, 1, H, W]
-    if mp.shape[0] == 1 and t > 1:
-        mp = mp.expand(t, -1, -1, -1)
-    elif mp.shape[0] != t:
-        idx = torch.linspace(0, mp.shape[0] - 1, t).round().long()
-        mp = mp[idx]
-    mp = F.adaptive_avg_pool2d(mp.float(), (h, w))          # [T, 1, h, w]
-    mp = mp.permute(1, 0, 2, 3).unsqueeze(0).clamp(0.0, 1.0)  # [1, 1, T, h, w]
-    weight = background_retention + (1.0 - background_retention) * mp
-    blurred = _blur_latent(z)
-    return (weight * z.float() + (1.0 - weight) * blurred).to(z.dtype)
-
-
-def _normalize_ref(src, label: str = "reference") -> torch.Tensor:
-    """Canonicalize any ref source to ``[T, H, W, C]`` (T=1 for stills).
-
-    Accepts ``[H, W, C]``, ``[B, H, W, C]``, and batch-video ``[B, T, H, W, C]``
-    (some video loaders emit the batch form).  Rejects empty frames with a
-    clear error instead of letting the VAE crash on a zero spatial dim.
-    """
-    if not isinstance(src, torch.Tensor) or src.dim() not in (3, 4, 5):
-        raise ValueError(
-            f"H3RefModExtract: {label} must be a 3-5D tensor, "
-            f"got {getattr(src, 'shape', src)}")
-    if src.dim() == 5:  # [B, T, H, W, C] batch video
-        if src.shape[0] == 0:
-            raise ValueError(
-                f"H3RefModExtract: {label} has no frames "
-                f"(T=0) — check the source image/video.")
-        src = src[0] if src.shape[0] == 1 else src.reshape(-1, *src.shape[2:])
-    if src.dim() == 3:  # [H, W, C]
-        src = src.unsqueeze(0)
-    if src.shape[-1] != 3 and src.shape[1] == 3:  # channel-first [B, C, H, W]
-        src = src.movedim(1, -1)
-    if src.dim() != 4 or src.shape[-1] != 3:
-        raise ValueError(
-            f"H3RefModExtract: {label} has an unexpected layout "
-            f"{tuple(src.shape)} (expected [T, H, W, 3])")
-    if src.shape[0] <= 0:
-        raise ValueError(
-            f"H3RefModExtract: {label} has no frames (T={src.shape[0]}) "
-            f"— check the source image/video.")
-    if src.shape[1] <= 0 or src.shape[2] <= 0:
-        raise ValueError(
-            f"H3RefModExtract: {label} has an empty frame "
-            f"({src.shape[1]}x{src.shape[2]}) — check the source image/video.")
-    return src
-
-
-def _sanitize_name(name: str) -> str:
-    name = name.strip().replace("/", "_").replace("\\", "_")
-    if not name:
-        raise ValueError("mod name must not be empty")
-    return name
-
-
-def _unique_mod_path(out_dir: str, name: str) -> "tuple[str, str]":
-    """Non-colliding ``(name, path_no_ext)`` for saving a new mod.
-
-    If ``{out_dir}/{name}.safetensors`` doesn't exist, saves under that exact
-    name. Otherwise appends ``_2``, ``_3``, ... until a free name is found —
-    creating a mod never silently overwrites an existing one with the same
-    name; the caller should use the returned ``name`` (not the original) as
-    the mod's own ``name`` field too, so the saved metadata/filename/loader
-    dropdown entry all agree.
-    """
-    candidate = name
-    n = 1
-    while os.path.isfile(os.path.join(out_dir, candidate) + ".safetensors"):
-        n += 1
-        candidate = f"{name}_{n}"
-    return candidate, os.path.join(out_dir, candidate)
-
-
 def _resolve_folder(folder: str) -> str:
     """Resolve a folder input: absolute path, a name inside input/, or input/ itself."""
     folder = (folder or "").strip().strip('"')
@@ -470,12 +266,6 @@ def _resolve_folder(folder: str) -> str:
             f"folder not found: {folder!r} (looked at '{resolved}'; use an "
             "absolute path or a folder name inside input/).")
     return resolved
-
-
-def _summarize(mod: H3RefMod) -> str:
-    mb = mod.latent.numel() * mod.latent.element_size() / 1024 / 1024
-    return (f"'{mod.name}' {mod.mode} {mod.kind} {tuple(mod.latent.shape)} "
-            f"({mod.token_count} tokens, {mb:.2f} MB)")
 
 
 def _info_lines(mod: H3RefMod) -> List[str]:
@@ -498,40 +288,6 @@ def _info_lines(mod: H3RefMod) -> List[str]:
         f"  {'description':<18} {mod.description or '-'}",
         "=" * 52,
     ]
-
-
-def _unpack_row(item) -> Tuple["H3RefMod", float, Optional[str]]:
-    """Normalize an H3_REF_MODS bundle row to ``(mod, strength, description_override)``.
-
-    Most loaders (H3RefModStacker, H3RefModsAxis, Extract's own output) emit
-    plain ``(mod, strength)`` 2-tuples — the mod's baked-in ``description`` is
-    used as-is.  H3RefModSingleLoader / H3RefModsCombine emit ``(mod,
-    strength, description)`` 3-tuples instead, so a description can be set at
-    load time (the same mod often needs a different label depending on what
-    you're generating) without touching the saved mod file.  Every consumer
-    of an H3_REF_MODS bundle goes through this so both row shapes work
-    everywhere the type is accepted.
-    """
-    if len(item) >= 3:
-        return item[0], item[1], (item[2] or None)
-    return item[0], item[1], None
-
-
-def _normalize_mods_input(mods) -> list:
-    """Accept either a single ``H3_REFMOD`` row or an ``H3_REF_MODS`` bundle.
-
-    A single row (from H3RefModSingleLoader) arrives as a bare ``(mod,
-    strength[, description])`` tuple — its first element is an ``H3RefMod``
-    instance.  A bundle (from H3RefModStacker / H3RefModsAxis /
-    H3RefModsCombine / Extract H3 RefMod) arrives as a list of such rows.
-    Distinguish by checking the first element's type so both can connect
-    straight to the same ``mods`` input without a Combine node in between.
-    """
-    if mods is None:
-        return []
-    if isinstance(mods, tuple) and len(mods) >= 2 and isinstance(mods[0], H3RefMod):
-        return [mods]
-    return list(mods)
 
 
 def _ref_blocks(mods, retention, curve=None, seed=-1,
@@ -557,7 +313,7 @@ def _ref_blocks(mods, retention, curve=None, seed=-1,
         factor = RETENTION.get(retention, 1.0)
     else:
         factor = float(retention)
-    items = _normalize_mods_input(mods)
+    items = [] if mods is None else list(mods)
     if int(seed) >= 0 and len(items) > 1:
         rng = random.Random(int(seed))
         rng.shuffle(items)
@@ -566,12 +322,17 @@ def _ref_blocks(mods, retention, curve=None, seed=-1,
         print(f"[H3RefModApply] scramble seed={int(seed)}: "
               f"{len(mods)} refs -> kept {len(items)} (order shuffled)")
     blocks = []
-    for row in items:
-        mod, strength, _desc = _unpack_row(row)
+    debug_rows = []
+    for mod, strength in items:
         eff = min(1.0, max(0.0, strength * factor))
         block = mod.ref_block(eff, curve=curve, use_video=use_video, use_audio=use_audio)
         if block is not None:
             blocks.append(block)
+            debug_rows.append(f"{mod.name}@{eff:.2f}")
+        else:
+            debug_rows.append(f"{mod.name}@{eff:.2f} (skipped)")
+    if debug_rows:
+        print("[H3RefModApply] effective refs: " + ", ".join(debug_rows))
     return blocks
 
 
@@ -622,9 +383,8 @@ def _prompt_hint(loads) -> str:
     skipped — a bare concept_type with nothing to say isn't a useful clue.
     """
     parts = []
-    for row in loads:
-        mod, _strength, desc_override = _unpack_row(row)
-        desc = desc_override or mod.description
+    for mod, _strength in loads:
+        desc = mod.description
         if desc:
             parts.append(f"{mod.concept_type}: {desc}")
     return "; ".join(parts)
@@ -753,13 +513,10 @@ class H3RefModApplyAdvanced(io.ComfyNode):
                 io.MatchType.Input("conditioning", template=template,
                     tooltip="MINIMAX_H3_COND (ComfyUI-MiniMaxH3 pack) or CONDITIONING "
                             "(core MiniMaxH3ReferenceToVideo)."),
-                io.MultiType.Input("mods",
-                    types=[io.Custom("H3_REFMOD"), io.Custom("H3_REF_MODS")],
+                io.Custom("H3_REF_MODS").Input("mods",
                     optional=True,
-                    tooltip="A single RefMod (from Load H3 RefMod) or a bundle (from Load H3 "
-                            "RefMods / Load H3 RefMod Axis / Combine H3 RefMods / Extract H3 "
-                            "RefMod) — connect either directly, no Combine node needed for "
-                        "just one mod. Leave unconnected to bypass unchanged."),
+                    tooltip="Bundle from Load RefMod / Load RefMod Stack / Visual RefMod Picker / "
+                            "Create H3 RefMod. Leave unconnected to bypass unchanged."),
                 io.Boolean.Input("use_video", default=True,
                     tooltip="Apply the visual latent from each RefMod. Turn this off to use only embedded audio."),
                 io.Boolean.Input("use_audio", default=True,
@@ -898,10 +655,9 @@ class H3RefModApplySimple(io.ComfyNode):
                 io.MatchType.Input("conditioning", template=template,
                     tooltip="MINIMAX_H3_COND (ComfyUI-MiniMaxH3 pack) or CONDITIONING "
                             "(core MiniMaxH3ReferenceToVideo)."),
-                io.MultiType.Input("mods",
-                    types=[io.Custom("H3_REFMOD"), io.Custom("H3_REF_MODS")],
+                io.Custom("H3_REF_MODS").Input("mods",
                     optional=True,
-                    tooltip="A single RefMod or a bundle of RefMods to inject. Leave unconnected to bypass unchanged."),
+                    tooltip="Bundle of RefMods to inject. Leave unconnected to bypass unchanged."),
                 io.Boolean.Input("use_video", default=True,
                     tooltip="Apply the visual latent from each RefMod. Turn this off to use only embedded audio."),
                 io.Boolean.Input("use_audio", default=True,

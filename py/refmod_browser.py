@@ -9,6 +9,8 @@ from .refmod_core import read_refmod_meta
 
 PREVIEW_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 HIDDEN_BROWSER_DIRS = {"graph_presets"}
+VISUAL_SUFFIX = "_Video"
+AUDIO_SUFFIX = "_Audio"
 
 
 def browser_root() -> str:
@@ -50,11 +52,24 @@ def safe_file_path(path: str) -> str:
 
 
 def _find_preview(path_no_ext: str) -> Optional[str]:
-    for ext in PREVIEW_EXTS:
-        candidate = path_no_ext + ext
-        if os.path.isfile(candidate):
-            return candidate
+    candidates = [path_no_ext]
+    base = path_no_ext
+    if os.path.basename(base).endswith(VISUAL_SUFFIX):
+        base = base[:-len(VISUAL_SUFFIX)]
+        candidates.insert(0, base)
+    for stem in candidates:
+        for ext in PREVIEW_EXTS:
+            candidate = stem + ext
+            if os.path.isfile(candidate):
+                return candidate
     return None
+
+
+def _display_mod_name(path_no_ext: str) -> str:
+    name = os.path.basename(path_no_ext)
+    if name.endswith(VISUAL_SUFFIX):
+        return name[:-len(VISUAL_SUFFIX)] or name
+    return name
 
 
 def _mod_entry(path: str) -> Optional[Dict]:
@@ -64,9 +79,11 @@ def _mod_entry(path: str) -> Optional[Dict]:
     meta = read_refmod_meta(path_no_ext)
     if meta is None or meta.get("kind") not in ("image", "video"):
         return None
+    if os.path.basename(path_no_ext).endswith(AUDIO_SUFFIX):
+        return None
     preview = _find_preview(path_no_ext)
     return {
-        "name": os.path.basename(path_no_ext),
+        "name": _display_mod_name(path_no_ext) + ".safetensors",
         "path": path,
         "preview_path": preview,
         "concept_type": str(meta.get("concept_type", "generic") or "generic"),

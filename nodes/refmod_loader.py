@@ -1,22 +1,11 @@
-"""
-refmod_single.py — H3RefModSingleLoader + H3RefModsCombine.
+"""refmod_loader.py — RefMod loader nodes.
 
-A LoRA-loader-style pair, as an alternative to the fixed-size
-H3RefModStacker (nodes/refmod_stacker.py):
+Loader surfaces now emit only ``H3_REF_MODS`` bundles so every downstream
+consumer sees one consistent row shape: plain ``(mod, strength)`` tuples.
 
-  H3RefModLoader        — load ONE RefMod with its own strength and 
-                          output as a single ``H3_REFMOD`` row.
-
-  H3RefModStacker        — collect multiple ``H3_REFMOD`` rows into one ``H3_REF_MODS``
-                          bundle; the input is a fixed 8-row combo list.
-  
-  H3RefModsCombine      — collect ``H3_REFMOD`` rows into one ``H3_REF_MODS``
-                          bundle; the input grows a new slot every time you
-                          connect another Load H3 RefMod node (autogrow,
-                          same "+" pattern as Extract H3 RefMod's ref_image_N/
-                          ref_video_N inputs), instead of picking from a
-                          fixed 8-row combo list.
-
+    H3RefModLoader   — load one RefMod and optionally append it to an existing
+                                         bundle, visual-picker style.
+    H3RefModStacker  — load 1-8 RefMods from combo slots into one bundle.
 """
 
 from __future__ import annotations
@@ -31,7 +20,7 @@ from ..py.refmod_core import H3RefMod
 
 
 class H3RefModLoader:
-    """Load a single RefMod with its own strength override."""
+    """Load one RefMod and append it to an existing bundle."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -45,10 +34,13 @@ class H3RefModLoader:
                                "copy of itself — identity fades smoothly instead of turning into "
                                "static/noise texture. 0 skips the mod entirely."}),
             },
+            "optional": {
+                "mods": ("H3_REF_MODS",),
+            },
         }
 
-    RETURN_TYPES = ("H3_REFMOD",)
-    RETURN_NAMES = ("mod",)
+    RETURN_TYPES = ("H3_REF_MODS", "STRING")
+    RETURN_NAMES = ("mods", "prompt_hint")
     FUNCTION = "load"
     CATEGORY = "H3RefMod"
 
@@ -58,11 +50,16 @@ class H3RefModLoader:
             return f"RefMod '{mod}' not found in mods/. Run Extract H3 RefMod first."
         return True
 
-    def load(self, mod, strength=1.0):
+    def load(self, mod, strength=1.0, mods=None):
+        rows = list(mods) if mods is not None else []
         m = _load_mod(mod)
         strength = min(1.0, max(0.0, float(strength)))
+        rows.append((m, strength))
         print(f"[H3RefModLoader] {m.name}@{strength:.2f}")
-        return ((m, strength, None),)
+        hint = _prompt_hint(rows)
+        if hint:
+            print(f"[H3RefModLoader] prompt_hint: {hint}")
+        return (rows, hint)
 
 
 class H3RefModStacker:
@@ -141,7 +138,7 @@ def _prompt_hint(rows):
         else:
             cleaned = str(description).strip()
         if cleaned:
-            parts.append(cleaned)
+            parts.append(f"{mod.concept_type}: {cleaned}")
     return "; ".join(parts)
 
 def _info_lines(mod: H3RefMod) -> List[str]:
@@ -164,60 +161,12 @@ def _info_lines(mod: H3RefMod) -> List[str]:
         "=" * 52,
     ]
 
-class H3RefModsCombine(io.ComfyNode):
-    """Combine individual 'Load H3 RefMod' outputs into one H3_REF_MODS bundle.
-
-    Connect Load H3 RefMod (single) nodes here — the "+" button on ``mods``
-    grows a new slot each time, LoRA-stack style, instead of a fixed-size
-    loader.  Connection order = subject/slot order downstream (MiniMax H3
-    RefMods to Video's ``<Subject N>`` numbering, Apply H3 RefMod's ref
-    order).
-    """
-
-    @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="H3RefModsCombine",
-            display_name="Combine H3 RefMods",
-            category="H3RefMod",
-            inputs=[
-                io.Autogrow.Input("mods", optional=True,
-                    template=io.Autogrow.TemplateNames(
-                        input=io.Custom("H3_REFMOD").Input("mod",
-                            tooltip="One RefMod load (from Load H3 RefMod), with its own strength override."),
-                        names=[f"mod_{i}" for i in range(1, 33)], min=0)),
-            ],
-            outputs=[
-                io.Custom("H3_REF_MODS").Output("mods",
-                    tooltip="Bundle for Apply H3 RefMod / MiniMax H3 RefMods to Video. Slot "
-                            "order = connection order."),
-            ],
-        )
-
-    @classmethod
-    def execute(cls, mods=None) -> io.NodeOutput:
-        ordered = []
-        for key in sorted((mods or {}).keys(), key=lambda k: int(k.rsplit("_", 1)[1])):
-            row = (mods or {})[key]
-            if row is not None:
-                ordered.append(row)
-        if not ordered:
-            raise ValueError("H3RefModsCombine: connect at least one Load H3 RefMod.")
-        print("[H3RefModsCombine] " + ", ".join(
-            f"{m.name}@{s:.2f}" + (f" ({d})" if d else "")
-            for m, s, d in ordered)
-            + f" ({sum(m.token_count for m, _s, _d in ordered)} tokens total)")
-        return io.NodeOutput(ordered)
-
-
 NODE_CLASS_MAPPINGS = {
     "H3RefModLoader":   H3RefModLoader,
     "H3RefModStacker":  H3RefModStacker,
-    "H3RefModsCombine": H3RefModsCombine,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3RefModLoader":   "Load RefMod",
     "H3RefModStacker":  "Load RefMod Stack",
-    "H3RefModsCombine": "Combine RefMods",
 }
