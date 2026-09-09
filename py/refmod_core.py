@@ -41,7 +41,6 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import comfy.utils
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
@@ -54,9 +53,8 @@ META_KEY = "refmod_meta"
 # "identity in training mode" warning in nodes.py, and (2) the loader's
 # prompt_hint output, which merges each loaded mod's concept_type +
 # description into a string you can concat onto your CLIP Text Encode prompt.
-# There's no CLIP-Vision / image-embedding injection point on H3's ref2va
-# path to hang a "visual clue" off of — text is the only channel the model's
-# text encoder reads, so that's the channel this uses.
+# The model only reads these labels through the text prompt, so prompt_hint is
+# the only place they are surfaced.
 CONCEPT_TYPES = (
     "generic",       # unspecified / mixed
     "identity",      # a specific person/character — use mode="encode" for this
@@ -511,14 +509,6 @@ class H3RefMod:
     # standalone "audio") ref block so the DiT attends to the soundtrack too.
     audio_latent: Optional[torch.Tensor] = None
     ref_audio_t: int = 0
-    # Optional real-pixel preview [T, H, W, 3] in [0, 1], small (see
-    # nodes.py's _THUMB_SHORT_EDGE/_THUMB_MAX_FRAMES). Was used to feed
-    # clip.tokenize(minimax_ref_items=...) for CLIP-vision tag grounding, but
-    # that didn't fix the multi-subject audio/video binding issue it was
-    # meant to address (see refmods_to_video.py's module docstring), so
-    # nothing currently consumes this field — kept for ref_item()/
-    # ensure_thumb() in case tag-based grounding is revisited later.
-    thumb: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         if self.kind not in ("image", "video"):
@@ -597,81 +587,6 @@ class H3RefMod:
             block["audio_latent"] = self.audio_latent if has_audio else None
         return block
 
-    def ref_item(self) -> Optional[Dict]:
-        """
-        Build the ``minimax_ref_items`` entry the native ref2va node feeds to
-        ``clip.tokenize(..., minimax_ref_items=...)``.
-
-        This is the CLIP-vision-side half of a reference; ``ref_block()`` is
-        the DiT-side half.  The native node builds both from the exact same
-        pixels, in lockstep, so a ``<Picture i>``/``<Video k>`` tag typed in
-        the prompt has real pixels for Qwen's vision encoder to ground it in
-        — that's what lets the model tell *this* subject apart from *that*
-        one instead of guessing from text alone.  Without a matching
-        ``ref_item()``, the tag is bare text and binding degrades to
-        guesswork (the "refs randomly swap" symptom this method fixes).
-
-        Returns ``None`` if this mod has no stored ``thumb`` (saved before
-        this field existed) — the caller should substitute a placeholder to
-        keep the item count/order aligned with the text tags, and warn the
-        user to re-extract for real grounding.
-        """
-        if self.thumb is None:
-            return None
-        has_audio = self.audio_latent is not None and self.ref_audio_t > 0
-        if self.kind == "video" or has_audio:
-            t = self.thumb.shape[0]
-            return {"type": "video", "data": self.thumb,
-                    "timestamps": [i / 2.0 for i in range(t)]}
-        return {"type": "image", "data": self.thumb[:1]}
-
-    def ensure_thumb(self, vae, max_frames: int = 4, short_edge: int = 384) -> torch.Tensor:
-        """
-        Return ``self.thumb``, decoding and caching it from the stored latent
-        via ``vae`` if this mod predates the thumbnail field (saved before
-        CLIP-vision grounding was added).  Mirrors ``H3RefModDecode``'s decode
-        convention exactly (``vae.decode`` on a ``[1, 24, T, h, w]`` latent,
-        reshape the 5D result, clamp to ``[0, 1]``), then downscales
-        (never upscales) to ``short_edge`` so the decoded preview is the same
-        rough size as an Extract-time thumbnail.
-
-        This avoids having to re-extract every existing mod just to get
-        reliable subject binding: connect the same VAE used at Extract time
-        (or any MiniMax H3 video VAE) to ``H3RefModsToVideo``'s ``vae`` input
-        and old mods decode a thumbnail on the fly instead.  The result is
-        cached on this in-memory instance (not written back to the saved
-        ``.safetensors``), so it only decodes once per mod per session — the
-        loader's ``_MOD_CACHE`` keeps the same instance across node runs.
-
-        A pooled (training-mode) mod decodes to a small, blurry preview —
-        that's still enough for the vision encoder to place "a person" at the
-        right slot, just with less fidelity than an encode-mode mod or a
-        proper Extract-time thumbnail.
-        """
-        if self.thumb is not None:
-            return self.thumb
-        z = self.latent
-        total_t = z.shape[2]
-        if total_t > max_frames:
-            idx = torch.linspace(0, total_t - 1, max_frames).round().long()
-            z = z[:, :, idx]
-        with torch.no_grad():
-            frames = vae.decode(z)
-        # video latent decodes channel-last with frame count on the batch dim
-        if frames.dim() == 5:  # [B, T, H, W, C] -> [B*T, H, W, C]
-            frames = frames.reshape(-1, frames.shape[-3], frames.shape[-2], frames.shape[-1])
-        frames = frames.clamp(0.0, 1.0).float()
-        h, w = frames.shape[1], frames.shape[2]
-        scale = min(1.0, short_edge / min(h, w))
-        if scale < 1.0:
-            tw = max(32, round(w * scale / 32) * 32)
-            th = max(32, round(h * scale / 32) * 32)
-            samples = frames.movedim(-1, 1)
-            samples = comfy.utils.common_upscale(samples, tw, th, "lanczos", "disabled")
-            frames = samples.movedim(1, -1)
-        self.thumb = frames.to(torch.float16)
-        return self.thumb
-
     # ── serialization ─────────────────────────────────────────────────
 
     def save(self, path_no_ext: str) -> str:
@@ -697,8 +612,6 @@ class H3RefMod:
         tensors = {"latent": self.latent.contiguous()}
         if self.audio_latent is not None and self.ref_audio_t > 0:
             tensors["audio_latent"] = self.audio_latent.contiguous()
-        if self.thumb is not None:
-            tensors["thumb"] = self.thumb.contiguous()
         save_file(tensors, path_no_ext + ".safetensors",
                   metadata={META_KEY: json.dumps(meta)})
         return path_no_ext + ".safetensors"
@@ -716,7 +629,6 @@ class H3RefMod:
         all_tensors = load_file(path_no_ext + ".safetensors", device=device)
         latent = all_tensors["latent"].clone()
         audio_latent = all_tensors["audio_latent"].clone() if "audio_latent" in all_tensors else None
-        thumb = all_tensors["thumb"].clone() if "thumb" in all_tensors else None
         return cls(
             name=meta.get("name", os.path.basename(path_no_ext)),
             kind=meta.get("kind", "image"),
@@ -734,6 +646,5 @@ class H3RefMod:
             concept_type=str(meta.get("concept_type", "generic") or "generic"),
             audio_latent=audio_latent,
             ref_audio_t=int(meta.get("ref_audio_t", 0)),
-            thumb=thumb,
         )
 

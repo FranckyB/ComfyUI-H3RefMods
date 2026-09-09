@@ -47,11 +47,11 @@ from ..py.refmod_core import (
     optimize_latent,
     pool_latent,
 )
+from ..py.h3_vae_loader import load_h3_vaes_from_av_encoder
 # reuse the encode helpers shared with the loader/mods-listing side of the pack
 from . import refmod_apply as _nodes_mod  # the pack's own nodes.py (for _MOD_LIST_CACHE_KEY)
 from .refmod_apply import (
     _ensure_min_size,
-    _h3_pack_submodule,
     _mask_latent,
     _MOD_CACHE,
     _MOD_CACHE_MAX,
@@ -62,8 +62,6 @@ from .refmod_apply import (
     _sanitize_name,
     _snap_to_causal_grid,
     _summarize,
-    _THUMB_MAX_FRAMES,
-    _THUMB_SHORT_EDGE,
     _unique_mod_path,
 )
 
@@ -560,7 +558,9 @@ class H3RefModCreateFromInputs(io.ComfyNode):
                             "while staying smooth and in-distribution), 1 = mask has no effect. "
                             "Middle values (0.3-0.6) partially blur instead of fully."),
                 io.Custom("MINIMAX_H3_AV_ENCODER").Input("av_encoder", optional=True,
-                    tooltip="MiniMax-H3 VAE pack output (preferred; share the pack's VAE cache)."),
+                    tooltip="MiniMax-H3 VAE loader output. Its saved video/audio paths are "
+                            "resolved locally, so RefMod extraction no longer imports the "
+                            "external pack's internals."),
                 io.Vae.Input("vae", optional=True,
                     tooltip="Standard VAE, used when av_encoder is not connected."),
                 io.Int.Input("ref_resolution", default=1024, min=256, max=2048, step=64,
@@ -650,10 +650,10 @@ class H3RefModCreateFromInputs(io.ComfyNode):
             raise ValueError(
                 "H3RefModExtract: connect an av_encoder (MiniMax-H3 "
                 "VAE loader) or a standard VAE.")
-        pack = None
         if av_encoder is not None:
-            vae_pack_mod = _h3_pack_submodule("models.vae")
-            pack = vae_pack_mod.load_vae_pack(av_encoder.video_path, av_encoder.audio_path)
+            vae, _ = load_h3_vaes_from_av_encoder(av_encoder, load_audio=False)
+        if vae is None:
+            raise ValueError("H3RefModExtract: no video VAE available for encoding.")
 
         # each Autogrow arrives as a dict keyed by its slot names
         # (ref_image_1..N / ref_video_1..N); videos stay multi-frame, images are
@@ -731,11 +731,8 @@ class H3RefModCreateFromInputs(io.ComfyNode):
         frames = []
         n_img = n_vid = 0
         source_shapes = []
-        thumb_frames_list = []
-        thumb_canvas = None
         n_refs = len(sources)
         pbar = comfy.utils.ProgressBar(n_refs)
-        thumb_budget = max(1, _THUMB_MAX_FRAMES // max(1, n_refs))
         for src_idx in range(len(sources)):
             src, is_video = sources[src_idx]
             label = f"ref {src_idx + 1}/{n_refs} ({'video' if is_video else 'image'})"
@@ -761,24 +758,6 @@ class H3RefModCreateFromInputs(io.ComfyNode):
                           f"{orig[0]}x{orig[1]} -> {src.shape[1]}x{src.shape[2]} "
                           f"(ref_resolution={ref_resolution}) before encode")
             src = _ensure_min_size(src)
-            # capture a small real-pixel thumbnail before it's consumed below,
-            # for clip.tokenize(minimax_ref_items=...) grounding at Apply time
-            # (see H3RefMod.thumb) — every source contributes at least one
-            # frame so a multi-ref mod's thumbnail shows every angle, not just
-            # the first.
-            if thumb_canvas is None:
-                th0, tw0 = src.shape[1], src.shape[2]
-                scale0 = min(1.0, _THUMB_SHORT_EDGE / min(th0, tw0))
-                thumb_canvas = (max(32, round(tw0 * scale0 / 32) * 32),
-                                max(32, round(th0 * scale0 / 32) * 32))
-            thumb_src = _resize_ref(src, _THUMB_SHORT_EDGE, thumb_canvas)
-            if is_video and thumb_src.shape[0] > 1:
-                n_pick = max(1, min(thumb_budget, thumb_src.shape[0]))
-                idx = torch.linspace(0, thumb_src.shape[0] - 1, n_pick).round().long()
-                thumb_src = thumb_src[idx]
-            else:
-                thumb_src = thumb_src[:1]
-            thumb_frames_list.append(thumb_src.to(torch.float16))
             if is_video and src.shape[0] > 1:
                 valid_t = _snap_to_causal_grid(src.shape[0])
                 if valid_t != src.shape[0]:
@@ -797,22 +776,7 @@ class H3RefModCreateFromInputs(io.ComfyNode):
                     f"ref_resolution={ref_resolution}, canvas={canvas}). "
                     f"Check that this specific reference's source image/video "
                     f"is valid.")
-            # encode-path conventions differ:
-            #  - av_encoder -> pack's raw H3 VAE: channel-first [1, 3, T, H, W]
-            #    in [-1, 1] (same as the pack's own conditioning node)
-            #  - vae -> comfy sd.VAE wrapper: channel-last [T, H, W, C] in [0, 1];
-            #    the wrapper does its own layout conversion and /16 cropping, and
-            #    would misread channel-first input (narrowing the channel dim to 0)
-            if pack is not None:
-                moved = src.movedim(-1, 1)
-                if moved.shape[0] == 1:
-                    pixels = moved
-                else:
-                    pixels = moved.permute(1, 0, 2, 3).unsqueeze(0)
-                pixels = (pixels * 2.0 - 1.0).to(torch.float16)
-                z = pack.encode_video(pixels)
-            else:
-                z = vae.encode(src)
+            z = vae.encode(src)
             if z.dim() != 5 or z.shape[1] != 24:
                 raise ValueError(
                     f"Expected a MiniMax H3 video VAE latent [1,24,T,H,W], "
@@ -865,10 +829,6 @@ class H3RefModCreateFromInputs(io.ComfyNode):
         kind = "video" if total_t > 1 else "image"
         # the VAE encodes at 16x spatial scale, so a latent of 40x20 = 640x320 px
         px_w, px_h = latent.shape[4] * 16, latent.shape[3] * 16
-        thumb = torch.cat(thumb_frames_list, dim=0)
-        if thumb.shape[0] > _THUMB_MAX_FRAMES:
-            idx = torch.linspace(0, thumb.shape[0] - 1, _THUMB_MAX_FRAMES).round().long()
-            thumb = thumb[idx]
         mod = H3RefMod(
             name=name,
             kind=kind,
@@ -885,7 +845,6 @@ class H3RefModCreateFromInputs(io.ComfyNode):
                 + ([f"masked (bg_retention={background_retention})"] if mask_batch is not None else []),
             description=(description or "").strip(),
             concept_type=concept_type,
-            thumb=thumb,
         )
 
         if save:

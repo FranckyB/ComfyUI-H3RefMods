@@ -29,12 +29,9 @@ weak_reference) multiplied with each loader row's strength.
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import json
 import os
 import random
-import sys
 from dataclasses import replace
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -88,63 +85,6 @@ RETENTION = {
     "attribute_transfer": 0.4,
     "weak_reference": 0.15,
 }
-
-# CLIP-vision grounding thumbnail (see H3RefMod.thumb / .ref_item()): small,
-# downscale-only, real pixels stored alongside the DiT-side latent so
-# clip.tokenize(minimax_ref_items=...) has something to actually ground a
-# <Picture i>/<Video k> tag in. Kept small on purpose — it's for subject
-# recognition, not for identity fidelity (the DiT latent still carries that).
-_THUMB_SHORT_EDGE = 384
-_THUMB_MAX_FRAMES = 4
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# ComfyUI-MiniMaxH3 pack integration
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _pack_dir() -> str:
-    custom_nodes = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(custom_nodes, "ComfyUI-MiniMaxH3")
-
-
-def _h3_pack_submodule(subpath: str):
-    """
-    Import a submodule of the ComfyUI-MiniMaxH3 pack.
-
-    ComfyUI registers custom node folders in sys.modules under their absolute
-    path with dots replaced by ``_x_``, so the normal import statement can't
-    reference it.  Prefer the already-loaded instance (shared VAE caches);
-    fall back to loading the pack under a clean name if it hasn't loaded yet.
-    """
-    pack_dir = os.path.abspath(_pack_dir())
-    if not os.path.isdir(pack_dir):
-        raise RuntimeError(
-            "ComfyUI-MiniMaxH3 pack not found at " + pack_dir + ". "
-            "Install it first (ComfyUI Manager: search 'MiniMax H3', or git "
-            "clone https://github.com/xiaolibai-sys/ComfyUI-MiniMaxH3 into "
-            "custom_nodes/) — it is required for the av_encoder input on "
-            "Extract H3 RefMod and the pack-conditioning Apply H3 RefMod node."
-        )
-    for name, mod in list(sys.modules.items()):
-        path = getattr(mod, "__file__", None) or getattr(mod, "__path__", None)
-        if path is None:
-            continue
-        try:
-            root = os.path.abspath(path if isinstance(path, str) else path[0])
-        except Exception:
-            continue
-        if root.startswith(pack_dir + os.sep) or root == pack_dir:
-            try:
-                return importlib.import_module(name + "." + subpath)
-            except ImportError:
-                pass
-    module_name = "ComfyUI_MiniMaxH3"
-    spec = importlib.util.spec_from_file_location(
-        module_name, os.path.join(pack_dir, "__init__.py"))
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = mod
-    spec.loader.exec_module(mod)
-    return importlib.import_module(module_name + "." + subpath)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -767,10 +707,10 @@ class H3RefModsAxis:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Node: H3RefModApply / ApplyCond
+# Node: H3RefModApplyAdvanced / ApplyCond
 # ═══════════════════════════════════════════════════════════════════════════
 
-class H3RefModApply(io.ComfyNode):
+class H3RefModApplyAdvanced(io.ComfyNode):
     """
     Inject a loader bundle of RefMods into a MiniMax H3 conditioning.
 
@@ -799,8 +739,8 @@ class H3RefModApply(io.ComfyNode):
             "cond",
             allowed_types=[io.Custom("MINIMAX_H3_COND"), io.Conditioning])
         return io.Schema(
-            node_id="H3RefModApply",
-            display_name="Apply H3 RefMod",
+            node_id="H3RefModApplyAdvanced",
+            display_name="Apply H3 RefMod Advanced",
             description=(
                 "Inject a loader bundle of RefMods into a MiniMax H3 conditioning. "
                 "Accepts both the pack's MINIMAX_H3_COND and the built-in "
@@ -919,6 +859,59 @@ class H3RefModApply(io.ComfyNode):
             print(f"[H3RefModApply] retention={retention} "
                   f"({len(blocks)} ref block(s) injected, {len(out.refs)} total)")
         return io.NodeOutput(out, pil_to_tensor(img))
+
+
+class H3RefModApplySimple(io.ComfyNode):
+    """Identity-oriented RefMod apply node with one strength dial."""
+
+    @classmethod
+    def define_schema(cls):
+        template = io.MatchType.Template(
+            "cond",
+            allowed_types=[io.Custom("MINIMAX_H3_COND"), io.Conditioning])
+        return io.Schema(
+            node_id="H3RefModApplySimple",
+            display_name="Apply H3 RefMod",
+            description=(
+                "Apply one or more RefMods to a MiniMax H3 conditioning with a single "
+                "Strength control. This identity-oriented version uses a flat full-length "
+                "reference curve under the hood."
+            ),
+            category="H3RefMod",
+            inputs=[
+                io.MatchType.Input("conditioning", template=template,
+                    tooltip="MINIMAX_H3_COND (ComfyUI-MiniMaxH3 pack) or CONDITIONING "
+                            "(core MiniMaxH3ReferenceToVideo)."),
+                io.MultiType.Input("mods",
+                    types=[io.Custom("H3_REFMOD"), io.Custom("H3_REF_MODS")],
+                    tooltip="A single RefMod or a bundle of RefMods to inject."),
+                io.Float.Input("strength", default=1.0, min=0.0, max=1.0, step=0.01,
+                    tooltip="Master reference strength. For identity work this is the main "
+                            "dial: higher = tighter identity lock, lower = more freedom but "
+                            "more drift."),
+            ],
+            outputs=[
+                io.MatchType.Output(template=template, display_name="conditioning",
+                    tooltip="The conditioning with the ref blocks injected, same type as the input."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, conditioning, mods, strength=1.0):
+        blocks = _ref_blocks(mods, strength, ("constant", "linear", 1.0), seed=-1)
+        if isinstance(conditioning, list):
+            out = []
+            for t in conditioning:
+                d = dict(t[1])
+                d["minimax_refs"] = list(d.get("minimax_refs", [])) + blocks
+                out.append([t[0], d])
+            print(f"[H3RefModApplySimple] strength={strength} "
+                  f"({len(blocks)} ref block(s) injected)")
+        else:
+            out = replace(conditioning, refs=list(conditioning.refs) + blocks)
+            print(f"[H3RefModApplySimple] strength={strength} "
+                  f"({len(blocks)} ref block(s) injected, {len(out.refs)} total)")
+        return io.NodeOutput(out)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1090,14 +1083,16 @@ class H3RefModFolderLoader:
 NODE_CLASS_MAPPINGS = {
     "H3RefModFolderLoader": H3RefModFolderLoader,
     "H3RefModsAxis": H3RefModsAxis,
-    "H3RefModApply": H3RefModApply,
+    "H3RefModApplyAdvanced": H3RefModApplyAdvanced,
+    "H3RefModApplySimple": H3RefModApplySimple,
     "H3RefModStepCurve": H3RefModStepCurve,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3RefModFolderLoader": "Load H3 RefMod Folder",
     "H3RefModsAxis": "Load H3 RefMod Axis",
-    "H3RefModApply": "Apply H3 RefMod",
+    "H3RefModApplyAdvanced": "Apply H3 RefMod Advanced",
+    "H3RefModApplySimple": "Apply H3 RefMod",
     "H3RefModStepCurve": "H3 RefMod Step Curve",
 }
 
