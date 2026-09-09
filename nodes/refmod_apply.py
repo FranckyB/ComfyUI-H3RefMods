@@ -754,10 +754,11 @@ class H3RefModApplyAdvanced(io.ComfyNode):
                             "(core MiniMaxH3ReferenceToVideo)."),
                 io.MultiType.Input("mods",
                     types=[io.Custom("H3_REFMOD"), io.Custom("H3_REF_MODS")],
+                    optional=True,
                     tooltip="A single RefMod (from Load H3 RefMod) or a bundle (from Load H3 "
                             "RefMods / Load H3 RefMod Axis / Combine H3 RefMods / Extract H3 "
                             "RefMod) — connect either directly, no Combine node needed for "
-                            "just one mod."),
+                        "just one mod. Leave unconnected to bypass unchanged."),
                 io.Float.Input("retention", default=1.0, min=0.0, max=1.0, step=0.01,
                     tooltip="Master reference strength, multiplied with each loader row's "
                              "strength. MiniMax retention levels: 1.0 = fully_preserved, "
@@ -825,6 +826,10 @@ class H3RefModApplyAdvanced(io.ComfyNode):
     def execute(cls, conditioning, mods, retention=1.0,
                 curve_direction="concept_at_end", curve_shape="ease", curve_value=1.0,
                 strength_curve=None, scramble_seed=-1, graph_preset="", save_preset_as=""):
+        if mods is None:
+            img = render_debug_grid((curve_direction, curve_shape, curve_value), "")
+            print("[H3RefModApply] no mods connected — bypassing conditioning unchanged")
+            return io.NodeOutput(conditioning, pil_to_tensor(img))
         # workflows saved before the curve split pass the old single preset name
         curve = strength_curve if strength_curve is not None \
             else (curve_direction, curve_shape, curve_value)
@@ -885,7 +890,8 @@ class H3RefModApplySimple(io.ComfyNode):
                             "(core MiniMaxH3ReferenceToVideo)."),
                 io.MultiType.Input("mods",
                     types=[io.Custom("H3_REFMOD"), io.Custom("H3_REF_MODS")],
-                    tooltip="A single RefMod or a bundle of RefMods to inject."),
+                    optional=True,
+                    tooltip="A single RefMod or a bundle of RefMods to inject. Leave unconnected to bypass unchanged."),
                 io.Float.Input("strength", default=1.0, min=0.0, max=1.0, step=0.01,
                     tooltip="Master reference strength. For identity work this is the main "
                             "dial: higher = tighter identity lock, lower = more freedom but "
@@ -899,6 +905,9 @@ class H3RefModApplySimple(io.ComfyNode):
 
     @classmethod
     def execute(cls, conditioning, mods, strength=1.0):
+        if mods is None:
+            print("[H3RefModApplySimple] no mods connected — bypassing conditioning unchanged")
+            return io.NodeOutput(conditioning)
         blocks = _ref_blocks(mods, strength, ("constant", "linear", 1.0), seed=-1)
         if isinstance(conditioning, list):
             out = []

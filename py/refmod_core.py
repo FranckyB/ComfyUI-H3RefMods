@@ -234,6 +234,69 @@ def optimize_latent(
     return refined
 
 
+def optimize_latent_multi(z_init, targets, steps=150, lr=0.02, device=None,
+                          progress_every=0, strategy="grouped"):
+    """Mean reconstruction objective with bounded activation memory."""
+    if not targets or steps <= 0:
+        return z_init
+    if strategy not in ("grouped", "stream", "resident"):
+        raise ValueError("Unknown multi-reference optimization strategy.")
+    device = device or z_init.device
+    with torch.inference_mode(False), torch.set_grad_enabled(True):
+        count = len(targets)
+        if strategy == "grouped":
+            groups = {}
+            for target in targets:
+                key = tuple(target.shape)
+                value = target.detach().to(device="cpu", dtype=torch.float32).clone()
+                if key in groups:
+                    groups[key][0].add_(value)
+                    groups[key][1] += 1
+                else:
+                    groups[key] = [value, 1]
+            grouped = []
+            for total, group_count in groups.values():
+                grouped.append((total.div_(group_count), group_count))
+        elif strategy == "resident":
+            resident = [target.detach().float().to(device) for target in targets]
+        param = nn.Parameter(z_init.clone().float().to(device))
+        opt = torch.optim.Adam([param], lr=lr)
+        for step_idx in range(steps):
+            opt.zero_grad()
+            loss = None
+            if strategy == "grouped":
+                total_weight = 0
+                for target_mean, group_count in grouped:
+                    target = target_mean.to(device)
+                    up = F.interpolate(param, size=tuple(target.shape[2:]), mode="trilinear",
+                                       align_corners=False)
+                    contribution = F.mse_loss(up, target)
+                    loss = contribution * group_count if loss is None else loss + contribution * group_count
+                    total_weight += group_count
+                loss = loss / total_weight
+            elif strategy == "stream":
+                for target_cpu in targets:
+                    target = target_cpu.detach().float().to(device)
+                    up = F.interpolate(param, size=tuple(target.shape[2:]), mode="trilinear",
+                                       align_corners=False)
+                    contribution = F.mse_loss(up, target)
+                    loss = contribution if loss is None else loss + contribution
+                loss = loss / count
+            else:
+                for target in resident:
+                    up = F.interpolate(param, size=tuple(target.shape[2:]), mode="trilinear",
+                                       align_corners=False)
+                    contribution = F.mse_loss(up, target)
+                    loss = contribution if loss is None else loss + contribution
+                loss = loss / count
+            loss.backward()
+            opt.step()
+            if progress_every and (step_idx + 1) % progress_every == 0:
+                print(f"[RefMod] identity {step_idx + 1}/{steps}")
+        refined = param.detach().to(z_init.dtype)
+    return refined
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Per-frame strength curve
 # ═══════════════════════════════════════════════════════════════════════════
