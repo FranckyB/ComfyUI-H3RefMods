@@ -64,8 +64,8 @@ from .refmod_loader import (
 )
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".aac", ".m4a", ".ogg", ".opus"}
-THUMB_TARGET_ASPECT = 1.0 / 1.0
-THUMB_ASPECT_TOLERANCE = 0.02
+THUMB_TARGET_ASPECT = 3.0 / 4.0
+THUMB_ASPECT_TOLERANCE = 0.05
 VISUAL_SUFFIX = "_Video"
 AUDIO_SUFFIX = "_Audio"
 
