@@ -57,6 +57,9 @@ def _find_preview(path_no_ext: str) -> Optional[str]:
     if os.path.basename(base).endswith(VISUAL_SUFFIX):
         base = base[:-len(VISUAL_SUFFIX)]
         candidates.insert(0, base)
+    elif os.path.basename(base).endswith(AUDIO_SUFFIX):
+        base = base[:-len(AUDIO_SUFFIX)]
+        candidates.insert(0, base)
     for stem in candidates:
         for ext in PREVIEW_EXTS:
             candidate = stem + ext
@@ -69,6 +72,8 @@ def _display_mod_name(path_no_ext: str) -> str:
     name = os.path.basename(path_no_ext)
     if name.endswith(VISUAL_SUFFIX):
         return name[:-len(VISUAL_SUFFIX)] or name
+    if name.endswith(AUDIO_SUFFIX):
+        return name[:-len(AUDIO_SUFFIX)] or name
     return name
 
 
@@ -77,10 +82,12 @@ def _mod_entry(path: str) -> Optional[Dict]:
         return None
     path_no_ext = path[:-len(".safetensors")]
     meta = read_refmod_meta(path_no_ext)
-    if meta is None or meta.get("kind") not in ("image", "video"):
+    if meta is None or meta.get("kind") not in ("image", "video", "audio"):
         return None
     if os.path.basename(path_no_ext).endswith(AUDIO_SUFFIX):
-        return None
+        paired_visual = path_no_ext[:-len(AUDIO_SUFFIX)] + VISUAL_SUFFIX + ".safetensors"
+        if os.path.isfile(paired_visual):
+            return None
     preview = _find_preview(path_no_ext)
     return {
         "name": _display_mod_name(path_no_ext) + ".safetensors",

@@ -647,21 +647,23 @@ def _create_mod_from_folder(
     description = (description or "").strip() or _auto_folder_description(folder, concept_type)
 
     images, videos, audios = _scan_folder(folder)
-    if not images and not videos:
+    has_visual = bool(images or videos)
+    has_audio_files = bool(audios)
+    if not has_visual and not has_audio_files:
         raise ValueError(
-            f"H3RefModCreateFromFolder: no images or videos found in '{folder}'. "
-            "Extraction needs at least one image or video reference.")
+            f"H3RefModCreateFromFolder: no images, videos, or audio found in '{folder}'. "
+            "Extraction needs at least one usable reference file.")
     print(f"[H3RefModCreateFromFolder] {folder}: {len(images)} image(s), "
           f"{len(videos)} video(s), {len(audios)} audio file(s)")
 
     ignored = []
-    if mode == "encode":
+    if has_visual and mode == "encode":
         ignored.append("pool_h, pool_w, Refinement Steps, merge, motion_only (Full Reference)")
-    if max_tokens == 0:
+    if has_visual and max_tokens == 0:
         ignored.append("budget_policy (max_tokens=0)")
     if ignored:
         print("[H3RefModCreateFromFolder] ignored: " + "; ".join(ignored))
-    if concept_type == "identity" and mode == "training" and max(pool_h, pool_w) < 16:
+    if has_visual and concept_type == "identity" and mode == "training" and max(pool_h, pool_w) < 16:
         print(
             f"[H3RefModCreateFromFolder] warning: concept_type='identity' with "
             f"mode='training' at a {pool_h}x{pool_w} grid — pooling averages away "
@@ -701,6 +703,17 @@ def _create_mod_from_folder(
             print(f"[H3RefModCreateFromFolder] {len(audios)} audio file(s) found but no "
                   "audio_vae connected — audio NOT embedded.")
 
+    include_audio = ref_audio_t > 0
+    if not has_visual and not include_audio:
+        if has_audio_files and audio_vae is None:
+            raise ValueError(
+                f"H3RefModCreateFromFolder: '{folder}' contains only audio files, but no audio_vae is connected. "
+                "Connect the MiniMax H3 audio VAE or add image/video references."
+            )
+        raise ValueError(
+            f"H3RefModCreateFromFolder: '{folder}' did not produce any usable visual or audio references."
+        )
+
     # ── load visual refs as tensors ──────────────────────────────────
     sources = []  # (tensor [T,H,W,3], is_video, mask [1,H,W] | None)
     for p in images:
@@ -725,7 +738,7 @@ def _create_mod_from_folder(
         canvas = (max(32, round(w * scale / 32) * 32),
                   max(32, round(h * scale / 32) * 32))
     pool_grid = None
-    if mode == "training":
+    if mode == "training" and sources:
         h0, w0 = sources[0][0].shape[1], sources[0][0].shape[2]
         pool_grid = aspect_grid(pool_h, pool_w, h0 / w0)
         if pool_grid != (pool_h, pool_w):
@@ -803,6 +816,7 @@ def _create_mod_from_folder(
         pbar.update_absolute(idx + 1)
 
     merged_n = 0
+    latent = None
     if merge_refs is not None:
         common_t = max(p.shape[2] for p, _ in merge_refs)
         init = torch.stack([pool_latent(p, common_t, gh, gw) for p, _ in merge_refs]).mean(0)
@@ -813,11 +827,11 @@ def _create_mod_from_folder(
             print("[H3RefModCreateFromFolder] merge refinement done")
         latent = init.to(torch.float16)
         merged_n = len(merge_refs)
-    else:
+    elif frames:
         latent = torch.cat(frames, dim=2)
-    if multiplier > 1:
+    if latent is not None and multiplier > 1:
         latent = latent.repeat(1, 1, multiplier, 1, 1)
-    if max_tokens > 0 and budget_policy == "error":
+    if latent is not None and max_tokens > 0 and budget_policy == "error":
         tokens = _latent_token_count(latent)
         if tokens > max_tokens:
             raise ValueError(
@@ -825,20 +839,20 @@ def _create_mod_from_folder(
                 f"max_tokens={max_tokens}. Increase the budget, reduce frames/resolution, "
                 "or switch budget_policy to 'truncate'."
             )
-    if max_tokens > 0:
+    if latent is not None and max_tokens > 0:
         latent = fit_token_budget(latent, max_tokens, name)
-    total_t = latent.shape[2]
-    kind = "video" if total_t > 1 else "image"
-    px_w, px_h = latent.shape[4] * 16, latent.shape[3] * 16
-    if merged_n:
-        source = f"merge {merged_n} refs"
-    elif len(frames) > 1:
-        source = "stack"
-    else:
-        source = "video" if n_vid else "image"
+    if latent is not None:
+        total_t = latent.shape[2]
+        kind = "video" if total_t > 1 else "image"
+        px_w, px_h = latent.shape[4] * 16, latent.shape[3] * 16
+        if merged_n:
+            source = f"merge {merged_n} refs"
+        elif len(frames) > 1:
+            source = "stack"
+        else:
+            source = "video" if n_vid else "image"
 
     out_dir = _resolve_output_dir(subfolder)
-    include_audio = ref_audio_t > 0
     requested_base = _base_refmod_name(name)
     if save:
         resolved_base, visual_name, visual_path_no_ext, audio_name, audio_path_no_ext = _unique_split_mod_paths(
@@ -854,30 +868,33 @@ def _create_mod_from_folder(
         visual_path_no_ext = os.path.join(out_dir, visual_name)
         audio_path_no_ext = os.path.join(out_dir, audio_name)
 
-    visual_mod = H3RefMod(
-        name=visual_name,
-        kind=kind,
-        latent=latent,
-        latent_h=latent.shape[3],
-        latent_w=latent.shape[4],
-        latent_t=total_t,
-        mode=mode,
-        source=source,
-        source_shape=" +".join(source_shapes),
-        pool=(f"full-res {px_w}x{px_h}px (short-edge cap {ref_resolution}px)"
-              if mode == "encode" else f"{total_t}x{gh}x{gw}"),
-        optimize_steps=int(identity) if mode == "training" else 0,
-        tags=[f"{n_img} img, {n_vid} vid"]
-               + ([f"merged {merged_n} refs"] if merged_n else [])
-               + (["motion_only"] if motion_applied else [])
-             + ([f"masked (bg_retention={background_retention})"] if mask_applied else [])
-               + ([f"x{multiplier} repeat"] if multiplier > 1 else [])
-               + ([f"paired {audio_name}"] if include_audio else []),
-        description=description,
-        concept_type=concept_type,
-        audio_concept_type="",
-    )
-    rows: List[Tuple[H3RefMod, float]] = [(visual_mod, 1.0)]
+    rows: List[Tuple[H3RefMod, float]] = []
+    visual_mod = None
+    if latent is not None:
+        visual_mod = H3RefMod(
+            name=visual_name,
+            kind=kind,
+            latent=latent,
+            latent_h=latent.shape[3],
+            latent_w=latent.shape[4],
+            latent_t=total_t,
+            mode=mode,
+            source=source,
+            source_shape=" +".join(source_shapes),
+            pool=(f"full-res {px_w}x{px_h}px (short-edge cap {ref_resolution}px)"
+                  if mode == "encode" else f"{total_t}x{gh}x{gw}"),
+            optimize_steps=int(identity) if mode == "training" else 0,
+            tags=[f"{n_img} img, {n_vid} vid"]
+                   + ([f"merged {merged_n} refs"] if merged_n else [])
+                   + (["motion_only"] if motion_applied else [])
+                   + ([f"masked (bg_retention={background_retention})"] if mask_applied else [])
+                   + ([f"x{multiplier} repeat"] if multiplier > 1 else [])
+                   + ([f"paired {audio_name}"] if include_audio else []),
+            description=description,
+            concept_type=concept_type,
+            audio_concept_type="",
+        )
+        rows.append((visual_mod, 1.0))
     if include_audio:
         audio_mod = _make_audio_refmod(
             audio_name, audio_latent, audio_concept_type, description,
@@ -886,21 +903,24 @@ def _create_mod_from_folder(
         rows.append((audio_mod, 1.0))
     total_tokens = _check_total_token_budget(rows, max_total_tokens)
     if save:
-        visual_path = visual_mod.save(visual_path_no_ext)
-        _copy_refmod_thumbnail(images, visual_path_no_ext)
-        _MOD_CACHE[visual_mod.name] = visual_mod
-        print(f"[CreateH3RefMod] saved {_summarize(visual_mod)} -> {visual_path}")
+        if visual_mod is not None:
+            visual_path = visual_mod.save(visual_path_no_ext)
+            _copy_refmod_thumbnail(images, visual_path_no_ext)
+            _MOD_CACHE[visual_mod.name] = visual_mod
+            print(f"[CreateH3RefMod] saved {_summarize(visual_mod)} -> {visual_path}")
         if include_audio:
-            audio_path = rows[1][0].save(audio_path_no_ext)
-            _MOD_CACHE[rows[1][0].name] = rows[1][0]
-            print(f"[CreateH3RefMod] saved {_summarize(rows[1][0])} -> {audio_path}")
+            audio_mod = rows[-1][0]
+            audio_path = audio_mod.save(audio_path_no_ext)
+            _MOD_CACHE[audio_mod.name] = audio_mod
+            print(f"[CreateH3RefMod] saved {_summarize(audio_mod)} -> {audio_path}")
         if len(_MOD_CACHE) > _MOD_CACHE_MAX:
             _MOD_CACHE.pop(next(iter(_MOD_CACHE)))
         _nodes_mod._MOD_LIST_CACHE_KEY = None  # refresh the loader dropdown
     else:
-        print(f"[CreateH3RefMod] {_summarize(visual_mod)} (not saved)")
+        if visual_mod is not None:
+            print(f"[CreateH3RefMod] {_summarize(visual_mod)} (not saved)")
         if include_audio:
-            print(f"[CreateH3RefMod] {_summarize(rows[1][0])} (not saved)")
+            print(f"[CreateH3RefMod] {_summarize(rows[-1][0])} (not saved)")
     print(f"[CreateH3RefMod] complete: {len(rows)} reference(s), {total_tokens} tokens")
     return rows
 
