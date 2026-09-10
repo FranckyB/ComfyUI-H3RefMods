@@ -341,7 +341,8 @@ function createRefModBrowserModal(initialPath, onSelect) {
         img.style.cssText = `
             width: 100%;
             height: 100%;
-            object-fit: contain;
+            object-fit: cover;
+            object-position: center center;
             display: block;
             background: rgba(0, 0, 0, 0.5);
         `;
@@ -455,8 +456,10 @@ app.registerExtension({
             node._configuredFromWorkflow = false;
 
             const modPathWidget = node.widgets?.find((w) => w.name === "mod_path");
-            const strengthWidget = node.widgets?.find((w) => w.name === "strength");
-            const audioStrengthWidget = node.widgets?.find((w) => w.name === "audio_strength");
+            const strengthWidget = node.widgets?.find((w) => w.name === "video_weight")
+                || node.widgets?.find((w) => w.name === "strength");
+            const audioStrengthWidget = node.widgets?.find((w) => w.name === "audio_weight")
+                || node.widgets?.find((w) => w.name === "audio_strength");
 
             const panel = document.createElement("div");
             panel.style.cssText = `
@@ -532,7 +535,7 @@ app.registerExtension({
             const audioStrengthWidgetIndex = node.widgets.indexOf(audioStrengthWidget);
             const numericStrengthWidget = node.addWidget(
                 "number",
-                "video_strength",
+                "video_weight",
                 strengthWidget?.value != null ? Number(strengthWidget.value) : 1.0,
                 (v) => {
                     if (strengthWidget) strengthWidget.value = Number(v);
@@ -540,7 +543,7 @@ app.registerExtension({
                 },
                 {
                     min: strengthWidget?.options?.min != null ? Number(strengthWidget.options.min) : 0,
-                    max: strengthWidget?.options?.max != null ? Number(strengthWidget.options.max) : 1,
+                    max: strengthWidget?.options?.max != null ? Number(strengthWidget.options.max) : 10,
                     step: strengthWidget?.options?.step != null ? Number(strengthWidget.options.step) : 0.01,
                     precision: 2,
                 }
@@ -549,7 +552,7 @@ app.registerExtension({
 
             const numericAudioStrengthWidget = node.addWidget(
                 "number",
-                "audio_strength",
+                "audio_weight",
                 audioStrengthWidget?.value != null ? Number(audioStrengthWidget.value) : 1.0,
                 (v) => {
                     if (audioStrengthWidget) audioStrengthWidget.value = Number(v);
@@ -557,7 +560,7 @@ app.registerExtension({
                 },
                 {
                     min: audioStrengthWidget?.options?.min != null ? Number(audioStrengthWidget.options.min) : 0,
-                    max: audioStrengthWidget?.options?.max != null ? Number(audioStrengthWidget.options.max) : 1,
+                    max: audioStrengthWidget?.options?.max != null ? Number(audioStrengthWidget.options.max) : 10,
                     step: audioStrengthWidget?.options?.step != null ? Number(audioStrengthWidget.options.step) : 0.01,
                     precision: 2,
                 }

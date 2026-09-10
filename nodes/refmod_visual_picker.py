@@ -13,6 +13,7 @@ from ..py.refmod_browser import (
 )
 from ..py.refmod_core import H3RefMod
 from ..py.refmod_common import _prompt_hint
+from .refmod_loader import _MAX_WEIGHT, _append_weighted_mod, _weight_display
 
 _VISUAL_MOD_CACHE: Dict[str, H3RefMod] = {}
 _VISUAL_MOD_CACHE_MAX = 24
@@ -60,24 +61,24 @@ class H3RefModVisualPicker:
                         "tooltip": "Selected RefMod safetensors path from the thumbnail browser.",
                     },
                 ),
-                "strength": (
+                "video_weight": (
                     "FLOAT",
                     {
                         "default": 1.0,
                         "min": 0.0,
-                        "max": 1.0,
+                        "max": _MAX_WEIGHT,
                         "step": 0.01,
-                        "tooltip": "How strongly the visual RefMod reference is preserved.",
+                        "tooltip": "Unified video weight control. 0 skips video. 0..1 behaves like the old strength control. Values above 1 repeat the same video RefMod as extra copies.",
                     },
                 ),
-                "audio_strength": (
+                "audio_weight": (
                     "FLOAT",
                     {
                         "default": 1.0,
                         "min": 0.0,
-                        "max": 1.0,
+                        "max": _MAX_WEIGHT,
                         "step": 0.01,
-                        "tooltip": "How strongly a paired audio RefMod is preserved. Legacy one-file combined RefMods cannot split this from visual strength.",
+                        "tooltip": "Unified audio weight control. 0 skips audio. 0..1 behaves like the old audio strength control. Values above 1 repeat the same audio RefMod as extra copies.",
                     },
                 ),
             },
@@ -94,14 +95,16 @@ class H3RefModVisualPicker:
         "A matching preview image with the same base name is shown when present; "
         "otherwise a placeholder is used. When a matching *_Audio file exists "
         "beside a *_Video file, both are loaded together and appended to the bundle, "
-        "with separate video/audio strengths. Legacy combined RefMods still use one shared strength."
+        "with separate video/audio weights. A weight in 0..1 behaves like the old strength control; "
+        "a weight above 1 repeats the same RefMod as extra copies. Legacy combined RefMods still use one shared video weight."
     )
 
     @classmethod
     def VALIDATE_INPUTS(cls, **kwargs):
         return True
 
-    def pick(self, mod_path: str, strength: float, audio_strength: float = 1.0, mods=None):
+    def pick(self, mod_path: str, video_weight: float = 1.0, audio_weight: float = 1.0,
+             mods=None, strength=None, audio_strength=None):
         rows: List[Tuple[H3RefMod, float]] = []
         if mods is not None and isinstance(mods, (list, tuple)):
             rows.extend(list(mods))
@@ -111,17 +114,21 @@ class H3RefModVisualPicker:
             hint = _prompt_hint(rows)
             return (rows, hint)
 
-        clipped = min(1.0, max(0.0, float(strength)))
-        clipped_audio = min(1.0, max(0.0, float(audio_strength)))
+        if strength is not None:
+            video_weight = strength
+        if audio_strength is not None:
+            audio_weight = audio_strength
         selected_mods = _load_mods_from_path(selected)
-        rows.extend(
-            (mod, clipped_audio if mod.kind == "audio" else clipped)
-            for mod in selected_mods
-        )
-        print("[H3RefModVisualPicker] " + ", ".join(
-            f"{mod.name}@{(clipped_audio if mod.kind == 'audio' else clipped):.2f}" for mod in selected_mods
-        ))
-        hint = _prompt_hint(rows)
+        hint_rows = list(mods) if mods is not None and isinstance(mods, (list, tuple)) else []
+        summaries = []
+        for mod in selected_mods:
+            weight = audio_weight if mod.kind == "audio" else video_weight
+            clipped = _append_weighted_mod(rows, mod, weight)
+            if clipped > 0.0:
+                hint_rows.append((mod, min(1.0, clipped)))
+            summaries.append(f"{mod.name}({_weight_display(clipped)})")
+        print("[H3RefModVisualPicker] " + ", ".join(summaries))
+        hint = _prompt_hint(hint_rows)
         if hint:
             print(f"[H3RefModVisualPicker] prompt_hint: {hint}")
         return (rows, hint)

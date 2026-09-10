@@ -35,6 +35,7 @@ _MOD_CACHE_MAX = 24                                # cap: never pin more mods in
 _MOD_LIST_CACHE_KEY = None                         # (dirs, mtimes, sizes) signature of the last _list_mod_names() scan
 _MOD_LIST_CACHE_VAL = None
 _MOD_SKIP_DIRS = {"graph_presets", ".git", "__pycache__"}
+_MAX_WEIGHT = 10.0
 
 # Mod storage lives in ComfyUI's models/ tree (created on first run) and is
 # registered as a first-class folder type so it shows up next to loras/unet.
@@ -113,6 +114,37 @@ def _load_mod(name: str) -> H3RefMod:
         _MOD_CACHE.pop(next(iter(_MOD_CACHE)))
     return mod
 
+
+def _normalize_weight(weight: float) -> float:
+    return min(_MAX_WEIGHT, max(0.0, float(weight)))
+
+
+def _expand_weight(weight: float) -> List[float]:
+    clipped = _normalize_weight(weight)
+    whole = int(clipped)
+    remainder = clipped - whole
+    strengths = [1.0] * whole
+    if remainder > 1e-6:
+        strengths.append(remainder)
+    return strengths
+
+
+def _append_weighted_mod(rows: List[tuple[H3RefMod, float]], mod: H3RefMod, weight: float) -> float:
+    clipped = _normalize_weight(weight)
+    rows.extend((mod, strength) for strength in _expand_weight(clipped))
+    return clipped
+
+
+def _weight_display(weight: float) -> str:
+    clipped = _normalize_weight(weight)
+    whole = int(clipped)
+    remainder = clipped - whole
+    if whole <= 0:
+        return f"{clipped:.2f}"
+    if remainder <= 1e-6:
+        return f"x{whole}"
+    return f"x{whole} + {remainder:.2f}"
+
 def _resolve_folder(folder: str) -> str:
     """Resolve a folder input: absolute path, a name inside input/, or input/ itself."""
     folder = (folder or "").strip().strip('"')
@@ -136,12 +168,11 @@ class H3RefModLoader:
         return {
             "required": {
                 "mod": (_list_mod_names(), {"tooltip": "The RefMod to load."}),
-                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                "weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": _MAX_WEIGHT, "step": 0.01,
                     "display": "number",
-                    "tooltip": "How strongly this mod's reference is preserved. 1.0 = full ref "
-                               "(official behavior). Lower values blur the ref toward a softened "
-                               "copy of itself — identity fades smoothly instead of turning into "
-                               "static/noise texture. 0 skips the mod entirely."}),
+                    "tooltip": "Unified weight control. 0 skips the mod. 0..1 behaves like the old "
+                               "strength control. Values above 1 repeat the same RefMod as extra "
+                               "copies: for example 2.7 becomes two full copies plus one 0.7 copy."}),
             },
             "optional": {
                 "mods": ("H3_REF_MODS",),
@@ -159,13 +190,17 @@ class H3RefModLoader:
             return f"RefMod '{mod}' not found in mods/. Run Extract H3 RefMod first."
         return True
 
-    def load(self, mod, strength=1.0, mods=None):
+    def load(self, mod, weight=1.0, mods=None, strength=None):
         rows = list(mods) if mods is not None else []
         m = _load_mod(mod)
-        strength = min(1.0, max(0.0, float(strength)))
-        rows.append((m, strength))
-        print(f"[H3RefModLoader] {m.name}@{strength:.2f}")
-        hint = _prompt_hint(rows)
+        if strength is not None:
+            weight = strength
+        clipped = _append_weighted_mod(rows, m, weight)
+        print(f"[H3RefModLoader] {m.name} weight={clipped:.2f} -> {_weight_display(clipped)}")
+        hint_rows = list(mods) if mods is not None else []
+        if clipped > 0.0:
+            hint_rows.append((m, min(1.0, clipped)))
+        hint = _prompt_hint(hint_rows)
         if hint:
             print(f"[H3RefModLoader] prompt_hint: {hint}")
         return (rows, hint)
@@ -186,12 +221,11 @@ class H3RefModStacker:
         }
         for i in range(1, cls.MAX_SLOTS + 1):
             required[f"mod_{i}"] = (names, {"tooltip": f"RefMod {i} to load, or {cls.NONE}."})
-            required[f"strength_{i}"] = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0,
+            required[f"weight_{i}"] = ("FLOAT", {"default": 1.0, "min": 0.0, "max": _MAX_WEIGHT,
                 "step": 0.01, "display": "number",
-                "tooltip": "How strongly this mod's reference is preserved. 1.0 = full ref (official "
-                           "behavior). Lower values blur the ref toward a softened copy of itself — "
-                           "identity fades smoothly and stays plausible instead of turning into "
-                           "static/noise texture. 0 skips the mod entirely."})
+                "tooltip": "Unified weight control. 0 skips the mod. 0..1 behaves like the old "
+                           "strength control. Values above 1 repeat the same RefMod as extra copies: "
+                           "for example 2.7 becomes two full copies plus one 0.7 copy."})
         return {"required": required}
 
     RETURN_TYPES = ("H3_REF_MODS", "STRING")
@@ -211,25 +245,28 @@ class H3RefModStacker:
 
     def stack(self, show_info=False, **kwargs):
         rows = []  # (mod, strength)
+        info_rows = []  # (mod, weight)
         for i in range(1, self.MAX_SLOTS + 1):
             name = str(kwargs.get(f"mod_{i}", self.NONE))
-            strength = float(kwargs.get(f"strength_{i}", 1.0))
-            if not name or name == self.NONE or strength <= 0.0:
+            weight = float(kwargs.get(f"weight_{i}", kwargs.get(f"strength_{i}", 1.0)))
+            if not name or name == self.NONE or weight <= 0.0:
                 continue
-            rows.append((_load_mod(name), min(1.0, max(0.0, strength))))
+            mod = _load_mod(name)
+            clipped = _append_weighted_mod(rows, mod, weight)
+            info_rows.append((mod, clipped))
         if rows:
             print("[H3RefModStacker] " + ", ".join(
-                f"{m.name}@{s:.2f}"
-                for m, s in rows)
+                f"{m.name}({_weight_display(weight)})"
+                for m, weight in info_rows)
                 + f" ({sum(m.token_count for m, _s in rows)} tokens total)")
         else:
             print("[H3RefModStacker] no mods selected "
-                  "(all slots (none) or strength 0)")
+                  "(all slots (none) or weight 0)")
         if show_info:
-            for mod, strength in rows:
+            for mod, weight in info_rows:
                 print("\n".join(_info_lines(mod)))
-                print(f"  {'strength':<18} {strength:.2f}")
-        hint = _prompt_hint(rows)
+                print(f"  {'weight':<18} {weight:.2f}")
+        hint = _prompt_hint([(mod, min(1.0, weight)) for mod, weight in info_rows])
         if hint:
             print(f"[H3RefModStacker] prompt_hint: {hint}")
         return (rows, hint)

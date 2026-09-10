@@ -9,10 +9,10 @@ This fork aims make character work simpler, with faster picking, simpler apply f
 ## Main additions
 
 - `Visual RefMod Picker` lets you browse `models/refmods` visually with previews and append a selected RefMod bundle to an incoming stack. When matching `*_Video` and `*_Audio` files exist for the same RefMod, they are shown as one picker item and loaded together.
-- `Visual RefMod Picker` also exposes separate strength controls for the visual and audio halves of a paired RefMod, so you can weaken video identity without also weakening the paired voice, or vice versa.
+- `Visual RefMod Picker` also exposes separate video/audio weight controls for the two halves of a paired RefMod. A weight from `0` to `1` behaves like the old strength control, while values above `1` repeat the same RefMod as extra copies, so `2.7` means two full copies plus one `0.7` copy.
 - `Create H3 RefMod From Folder` scans a folder of images, video, and optional audio, writes metadata, and saves upstream-compatible split RefMods as `*_Video.safetensors` and `*_Audio.safetensors` when audio is present. It can also batch-create one RefMod set per immediate subfolder and copy a matching thumbnail beside the saved mod.
 - `Create H3 RefMod From Inputs` creates a RefMod directly from wired image, video, and optional audio inputs.
-- `Load RefMod` and `Load RefMod Stack` loads one or more saved RefMods for reuse.
+- `Load RefMod` and `Load RefMod Stack` load one or more saved RefMods for reuse and now use the same weight behavior: `0..1` is regular strength, values above `1` expand into repeated copies plus a fractional tail.
 - `Apply H3 RefMod` is the streamlined apply node for the usual identity case, using a flat full-length reference curve.
 - `Apply H3 RefMod Advanced` keeps the fuller timing and shaping controls for more deliberate modulation.
 - `Apply H3 RefMod Axis` lets you feed in two `Visual RefMod Picker` selections and treat them like a signed slider for video and audio independently: negative values select A, positive values select B, and `0` means no effect for that channel.
@@ -26,3 +26,11 @@ This fork aims make character work simpler, with faster picking, simpler apply f
 - The visual browser is intentionally scoped to `models/refmods` and its subfolders.
 
 Usage details, background, and longer explanations from original add-on in [docs/README.md](docs/README.md).
+
+## Installation
+
+### Manual
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/FranckyB/ComfyUI-H3RefMods
+```
