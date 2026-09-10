@@ -6,6 +6,11 @@ Compact RefMod tools for MiniMax H3, fork is tuned more deliberately toward iden
 
 This fork aims make character work simpler, with faster picking, simpler apply flow and easier RefMod creation from dataset folders. The more advanced option can be used by installing the original add-on.
 
+
+![Extract H3 RefMod in use](docs/examples/browser_example.png)
+![alt text](docs/examples/workflow_example.png)
+![alt text](docs/examples/create_from_folder_example.png)
+
 ## Main additions
 
 - `Visual RefMod Picker` lets you browse `models/refmods` visually with previews and append a selected RefMod bundle to an incoming stack. When matching `*_Video` and `*_Audio` files exist for the same RefMod, they are shown as one picker item and loaded together.
