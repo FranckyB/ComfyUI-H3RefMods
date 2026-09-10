@@ -7,9 +7,23 @@ Compact RefMod tools for MiniMax H3, fork is tuned more deliberately toward iden
 This fork aims make character work simpler, with faster picking, simpler apply flow and easier RefMod creation from dataset folders. The more advanced option can be used by installing the original add-on.
 
 
-![Extract H3 RefMod in use](docs/examples/browser_example.png)
-![alt text](docs/examples/workflow_example.png)
-![alt text](docs/examples/create_from_folder_example.png)
+<p align="center">
+  <img src="docs/examples/browser_example.png" alt="Extract H3 RefMod in use" />
+  <br />
+  <em>Example using refMods from <a href="https://huggingface.co/spaces/malcolmrey/browser">Malcolm Reynolds</a>.</em>
+</p>
+
+<p align="center">
+  <img src="docs/examples/workflow_example.png" alt="Workflow example" />
+  <br />
+  <em>Workflow example.</em>
+</p>
+
+<p align="center">
+  <img src="docs/examples/create_from_folder_example.png" alt="Create from folder example" />
+  <br />
+  <em>Create refMods from Folder example.</em>
+</p>
 
 ## Main additions
 
