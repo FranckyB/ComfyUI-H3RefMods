@@ -4,7 +4,7 @@ Fork of [ComfyUI-MiniMaxH3Mod](https://github.com/Luisacaotica/ComfyUI-MiniMaxH3
 
 Compact RefMod tools for MiniMax H3, fork is tuned more deliberately toward identity workflows while keeping the compatibility with original add-on.  They can both be used at the same time.
 
-This fork aims make character work simpler, with faster picking, simpler apply flow and easier RefMod creation from dataset folders. The more advanced option can be used by installing the original add-on.
+This fork aims to make character work simpler, with faster picking, simpler apply flow and easier refMod creation from dataset folders. The more advanced option can be used by installing the original add-on.
 
 
 <p align="center">
@@ -39,12 +39,10 @@ This fork aims make character work simpler, with faster picking, simpler apply f
 
 ## Notes
 
-- This fork keeps prior RefMod behavior and compatibility in place where practical, but the node set has been geared up around a clearer identity-oriented workflow.
-- Local H3 VAE loading is supported, so creation no longer depends on pulling VAE internals from an external MiniMax H3 custom-node pack.
+- This fork keeps prior RefMod behavior and compatibility in place, but have been set to default to an identity-oriented workflow.
 - Split `*_Video` and `*_Audio` RefMods are designed to stay compatible with `ComfyUI-MiniMaxH3Mod`, while the local picker/browser groups them as one logical item for convenience.
-- The visual browser is intentionally scoped to `models/refmods` and its subfolders.
 
-Usage details, background, and longer explanations from original add-on in [docs/README.md](docs/README.md).
+More advanced explaination can be found at [ComfyUI-MiniMaxH3Mod](https://github.com/Luisacaotica/ComfyUI-MiniMaxH3Mod)
 
 ## Installation
 
