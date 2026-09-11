@@ -1519,7 +1519,12 @@ class H3RefModCreateFromInputs(io.ComfyNode):
                         src = src[:valid_t]
                 mask_px = None
                 if mask_batch is not None:
-                    mask_px = _resize_mask(mask_batch[src_idx:src_idx + 1], src.shape[1], src.shape[2])
+                    mask_px = _resize_mask(
+                        mask_batch[src_idx:src_idx + 1],
+                        src.shape[1],
+                        src.shape[2],
+                        "center" if mode == "encode" and canvas is not None else "disabled",
+                    )
                 if src.shape[1] <= 0 or src.shape[2] <= 0:
                     raise ValueError(
                         f"H3RefModExtract: reference {src_idx + 1} "
@@ -1643,7 +1648,7 @@ class H3RefModCreateFromInputs(io.ComfyNode):
         total_tokens = _check_total_token_budget(rows, max_total_tokens)
 
         if save:
-            out_dir = _resolve_output_dir("", subfolder)
+            out_dir = _resolve_output_dir(subfolder)
             resolved_base, saved_visual_name, visual_path_no_ext, saved_audio_name, audio_path_no_ext = _unique_split_mod_paths(
                 out_dir, requested_base, include_audio=audio is not None)
             if has_visual and saved_visual_name != visual_name:
