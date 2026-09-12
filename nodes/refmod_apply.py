@@ -75,7 +75,7 @@ class H3RefModApplySimple(io.ComfyNode):
             allowed_types=[io.Custom("MINIMAX_H3_COND"), io.Conditioning])
         return io.Schema(
             node_id="H3RefModApplySimple",
-            display_name="Apply H3 RefMod",
+            display_name="Apply H3 RefMod Simple",
             description=(
                 "Apply one or more RefMods to a MiniMax H3 conditioning with a single "
                 "Strength control. This identity-oriented version uses a flat full-length "
