@@ -81,7 +81,7 @@ class H3RefModApplySimple(io.ComfyNode):
                 "Strength control. This identity-oriented version uses a flat full-length "
                 "reference curve under the hood."
             ),
-            category="H3RefMod",
+            category="H3RefModPicker",
             inputs=[
                 io.MatchType.Input("conditioning", template=template,
                     tooltip="MINIMAX_H3_COND (ComfyUI-MiniMaxH3 pack) or CONDITIONING "

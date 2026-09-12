@@ -399,7 +399,7 @@ def _apply_extraction_preset(mode, ref_resolution, pool_h, pool_w, identity,
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Audio loading + encoding (ported from tools/extract_mod.py)
+# Audio loading + encoding
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _load_audio_waveform(path: str) -> "tuple[torch.Tensor, int]":
@@ -445,7 +445,7 @@ def _resample(waveform: torch.Tensor, sr: int, target_sr: int) -> torch.Tensor:
 
 
 def _encode_ref_audio(audio_vae, waveform: torch.Tensor, sr: int, device) -> torch.Tensor:
-    """Encode a waveform to an H3 audio latent [1, 32, 2, T] (see CLI extract_mod)."""
+    """Encode a waveform to an H3 audio latent [1, 32, 2, T]."""
     import comfy.model_management
     vae_sr = getattr(audio_vae, "audio_sample_rate", 32000)
     if sr != vae_sr:
@@ -933,7 +933,7 @@ class H3RefModCreateFromFolder(io.ComfyNode):
         return io.Schema(
             node_id="H3RefModCreateFromFolder",
             display_name="Create H3 RefMod From Folder",
-            category="H3RefMod",
+            category="H3RefModPicker",
             description="Scan a dataset folder for reference images/videos/audio and "
                         "create a RefMod (.safetensors). Defaults to an 'identity' "
                         "concept in 'Full Reference' mode — the right choice for a person/"
@@ -1167,7 +1167,7 @@ class H3RefModCreateFromInputs(io.ComfyNode):
                 "Deprecated: for future workflows, prefer 'Create H3 RefMod Master' from "
                 "ComfyUI-MiniMaxH3Mod."
             ),
-            category="H3RefMod",
+            category="H3RefModPicker",
             inputs=[
                 io.String.Input("name", default="my_concept",
                     tooltip="Saved mod name (appears in the Load H3 RefMods dropdown after a reload)."),

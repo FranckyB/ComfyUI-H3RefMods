@@ -46,7 +46,7 @@ class H3RefModVisualPicker:
     """Pick a RefMod by browsing models/refmods thumbnails and append it to a bundle."""
 
     NAME = "Visual RefMod Picker"
-    CATEGORY = "H3RefMod"
+    CATEGORY = "H3RefModPicker"
 
     @classmethod
     def INPUT_TYPES(cls):

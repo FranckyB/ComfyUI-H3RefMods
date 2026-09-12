@@ -156,7 +156,7 @@ class H3RefModLoader:
     RETURN_TYPES = ("H3_REF_MODS", "STRING")
     RETURN_NAMES = ("mods", "prompt_hint")
     FUNCTION = "load"
-    CATEGORY = "H3RefMod"
+    CATEGORY = "H3RefModPicker"
 
     @classmethod
     def VALIDATE_INPUTS(cls, mod, **kwargs):

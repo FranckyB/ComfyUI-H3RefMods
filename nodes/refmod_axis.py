@@ -112,7 +112,7 @@ class H3RefModApplyAxis:
     RETURN_TYPES = ("H3_REF_MODS", "STRING")
     RETURN_NAMES = ("mods", "prompt_hint")
     FUNCTION = "select"
-    CATEGORY = "H3RefMod"
+    CATEGORY = "H3RefModPicker"
 
     def select(self, mods_a, mods_b, video_value=0.0, audio_value=0.0, show_info=False):
         _group_a, video_a, audio_a = _split_trailing_selection(mods_a, "A")

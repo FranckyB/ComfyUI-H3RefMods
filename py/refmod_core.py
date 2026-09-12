@@ -478,11 +478,6 @@ def curve_value_at(spec, x: float) -> float:
     return 1.0
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Token budget cap (shared by the Extract node and extract_mod.py)
-# ═══════════════════════════════════════════════════════════════════════════
-
-
 def dedup_frame_indices(z: torch.Tensor, threshold: float = 0.02) -> List[int]:
     """Indices of latent frames kept by greedy temporal dedup.
 

@@ -48,6 +48,4 @@ every generation, no training.
 
 ### Misc
 
-- `extract_mod.py` standalone CLI.
-- Mods live in `ComfyUI/models/refmods/` (created on first run, next to
-  loras/ and unet/); older mods in the pack's `mods/` folder still load.
+- Mods live in `ComfyUI/models/refmods/` (created on first run)
