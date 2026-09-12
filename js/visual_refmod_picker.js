@@ -3,6 +3,51 @@ import { api } from "../../scripts/api.js";
 
 const PLACEHOLDER_IMAGE_PATH = new URL("./placeholder.png", import.meta.url).href;
 
+function isTypingTarget(target) {
+    if (!target) return false;
+    const tag = String(target.tagName || "").toUpperCase();
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || !!target.isContentEditable;
+}
+
+let _vrpHoveredNode = null;
+let _vrpArrowListenerInstalled = false;
+
+function isVrpNodeInGraph(node) {
+    if (!node || !app.graph?._nodes) return false;
+    return app.graph._nodes.includes(node);
+}
+
+function getActiveVisualRefModPickerNode() {
+    if (_vrpHoveredNode && !_vrpHoveredNode.flags?.collapsed && isVrpNodeInGraph(_vrpHoveredNode)) {
+        return _vrpHoveredNode;
+    }
+    if (_vrpHoveredNode && !isVrpNodeInGraph(_vrpHoveredNode)) {
+        _vrpHoveredNode = null;
+    }
+    return null;
+}
+
+function installVrpArrowNavigation() {
+    if (_vrpArrowListenerInstalled) return;
+    _vrpArrowListenerInstalled = true;
+
+    window.addEventListener("keydown", async (event) => {
+        if (event.defaultPrevented) return;
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+        if (isTypingTarget(event.target)) return;
+
+        const node = getActiveVisualRefModPickerNode();
+        if (!node || typeof node._vrpStepModByDelta !== "function") return;
+
+        const direction = event.key === "ArrowRight" ? 1 : -1;
+        const handled = await node._vrpStepModByDelta(direction);
+        if (!handled) return;
+        event.preventDefault();
+        event.stopPropagation();
+    }, true);
+}
+
 function hideWidget(widget) {
     if (!widget) return;
     widget.hidden = true;
@@ -484,6 +529,24 @@ app.registerExtension({
                 border: 1px solid rgba(78, 90, 108, 0.72);
                 overflow: hidden;
                 box-sizing: border-box;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 4px;
+            `;
+
+            const portraitFrame = document.createElement("div");
+            portraitFrame.style.cssText = `
+                position: relative;
+                height: 100%;
+                width: auto;
+                max-width: 100%;
+                max-height: 100%;
+                aspect-ratio: 3 / 4;
+                border-radius: 8px;
+                overflow: hidden;
+                background: rgba(0, 0, 0, 0.5);
+                flex: 0 1 auto;
             `;
 
             const img = document.createElement("img");
@@ -494,7 +557,7 @@ app.registerExtension({
                 inset: 0;
                 width: 100%;
                 height: 100%;
-                object-fit: contain;
+                object-fit: cover;
                 object-position: center center;
                 display: block;
                 user-select: none;
@@ -518,11 +581,38 @@ app.registerExtension({
                 pointer-events: none;
             `;
 
-            previewBox.append(img, emptyLabel);
+            portraitFrame.appendChild(img);
+            portraitFrame.appendChild(emptyLabel);
+            previewBox.appendChild(portraitFrame);
 
             const clickCatcher = document.createElement("div");
-            clickCatcher.style.cssText = "position:absolute; inset:0; cursor:pointer; background:transparent;";
+            clickCatcher.style.cssText = `
+                position: absolute;
+                inset: 0;
+                cursor: pointer;
+                background: transparent;
+            `;
             previewBox.appendChild(clickCatcher);
+
+            previewBox.addEventListener("wheel", (event) => {
+                const canvas = app.canvas?.canvas || document.querySelector("canvas.lgraphcanvas");
+                if (!canvas) return;
+                const forwarded = new WheelEvent("wheel", {
+                    bubbles: true,
+                    cancelable: true,
+                    clientX: event.clientX,
+                    clientY: event.clientY,
+                    deltaX: event.deltaX,
+                    deltaY: event.deltaY,
+                    deltaZ: event.deltaZ,
+                    deltaMode: event.deltaMode,
+                    ctrlKey: event.ctrlKey,
+                    shiftKey: event.shiftKey,
+                    altKey: event.altKey,
+                    metaKey: event.metaKey,
+                });
+                canvas.dispatchEvent(forwarded);
+            }, { passive: true });
             panel.appendChild(previewBox);
 
             const domWidget = node.addDOMWidget("vrp_preview", "div", panel, {
@@ -620,7 +710,39 @@ app.registerExtension({
             filePickerWidget.serialize = false;
             node._vrpModMap = { "(none)": null };
 
-            const loadPreview = (entry) => {
+            node._vrpStepModByDelta = async (delta) => {
+                const direction = delta >= 0 ? 1 : -1;
+                const labels = Array.isArray(filePickerWidget?.options?.values)
+                    ? filePickerWidget.options.values.filter((label) => label !== "(none)")
+                    : [];
+                if (labels.length <= 1) return false;
+
+                const currentLabel = String(filePickerWidget?.value || "");
+                const currentIndex = labels.indexOf(currentLabel);
+
+                let nextIndex;
+                if (currentIndex < 0) {
+                    nextIndex = direction > 0 ? 0 : labels.length - 1;
+                } else {
+                    nextIndex = (currentIndex + direction + labels.length) % labels.length;
+                }
+
+                const nextLabel = labels[nextIndex];
+                if (!nextLabel) return false;
+
+                filePickerWidget.value = nextLabel;
+                if (typeof filePickerWidget.callback === "function") {
+                    filePickerWidget.callback(nextLabel);
+                } else {
+                    const nextEntry = node._vrpModMap?.[nextLabel] || null;
+                    setSelection(nextEntry);
+                }
+                return true;
+            };
+
+            installVrpArrowNavigation();
+
+            const loadPreview = async (entry) => {
                 if (!entry || !entry.path) {
                     img.removeAttribute("src");
                     img.style.display = "none";
@@ -629,7 +751,7 @@ app.registerExtension({
                 }
                 img.style.display = "block";
                 emptyLabel.style.display = "none";
-                img.src = entry.preview_path ? `${buildPreviewUrl(entry.preview_path)}&${Date.now()}` : PLACEHOLDER_IMAGE_PATH;
+                img.src = entry.preview_path ? buildPreviewUrl(entry.preview_path) : PLACEHOLDER_IMAGE_PATH;
             };
 
             const setSelection = (entry) => {
@@ -641,7 +763,7 @@ app.registerExtension({
                 node.properties._vrpModPath = value;
                 node.properties._vrpModDir = selected?.path ? dirnameForPath(selected.path) : (node.properties._vrpModDir || "");
                 node.properties._vrpPreviewPath = selected?.preview_path || "";
-                loadPreview(selected);
+                void loadPreview(selected);
                 node.setDirtyCanvas(true, true);
             };
 
@@ -718,10 +840,50 @@ app.registerExtension({
                 }
             }
 
+            if (filePickerWidget && browseButton) {
+                const pickerIndex = node.widgets.indexOf(filePickerWidget);
+                const buttonIndex = node.widgets.indexOf(browseButton);
+                if (pickerIndex >= 0 && buttonIndex >= 0) {
+                    node.widgets.splice(buttonIndex, 1);
+                    node.widgets.splice(pickerIndex + 1, 0, browseButton);
+                }
+            }
+
             clickCatcher.addEventListener("click", async (event) => {
                 event.stopPropagation();
                 await openBrowser();
             });
+
+            const onMouseMove = node.onMouseMove;
+            node.onMouseMove = function () {
+                _vrpHoveredNode = this;
+                return onMouseMove?.apply(this, arguments);
+            };
+
+            const onMouseEnter = node.onMouseEnter;
+            node.onMouseEnter = function () {
+                _vrpHoveredNode = this;
+                return onMouseEnter?.apply(this, arguments);
+            };
+
+            const onMouseLeave = node.onMouseLeave;
+            node.onMouseLeave = function () {
+                if (_vrpHoveredNode === this) {
+                    _vrpHoveredNode = null;
+                }
+                return onMouseLeave?.apply(this, arguments);
+            };
+
+            if (previewBox) {
+                previewBox.addEventListener("mouseenter", () => {
+                    _vrpHoveredNode = node;
+                });
+                previewBox.addEventListener("mouseleave", () => {
+                    if (_vrpHoveredNode === node) {
+                        _vrpHoveredNode = null;
+                    }
+                });
+            }
 
             const originalSerialize = node.serialize;
             node.serialize = function () {
@@ -799,7 +961,7 @@ app.registerExtension({
                 if (restoredEntry) {
                     setSelection(restoredEntry);
                 } else {
-                    loadPreview(restoredPath ? { path: restoredPath, preview_path: node.properties?._vrpPreviewPath || "" } : null);
+                    void loadPreview(restoredPath ? { path: restoredPath, preview_path: node.properties?._vrpPreviewPath || "" } : null);
                 }
                 return res;
             };
@@ -814,7 +976,7 @@ app.registerExtension({
                 if (initialEntry) {
                     setSelection(initialEntry);
                 } else {
-                    loadPreview(initialPath ? { path: initialPath, preview_path: node.properties?._vrpPreviewPath || "" } : null);
+                    void loadPreview(initialPath ? { path: initialPath, preview_path: node.properties?._vrpPreviewPath || "" } : null);
                 }
                 if (!node.properties?._configuredFromWorkflow) {
                     node.setSize([240, 400]);
