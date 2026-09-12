@@ -72,6 +72,11 @@ function dirnameForPath(value) {
     return i > 0 ? normalized.substring(0, i) : "";
 }
 
+function normalizeSelectedModPath(value) {
+    const path = String(value || "").trim();
+    return path && path.toLowerCase() !== "(none)" ? path : "";
+}
+
 function buildPreviewUrl(path) {
     if (!path) return PLACEHOLDER_IMAGE_PATH;
     return api.apiURL(`/h3refmods/refmod-browser/file?path=${encodeURIComponent(path)}`);
@@ -900,6 +905,16 @@ app.registerExtension({
 
             const originalSerialize = node.serialize;
             node.serialize = function () {
+                const serializedModPath = normalizeSelectedModPath(
+                    node.properties?._vrpModPath || modPathWidget?.value || ""
+                );
+                if (modPathWidget) {
+                    modPathWidget.value = serializedModPath;
+                }
+                node.properties._vrpModPath = serializedModPath;
+                if (serializedModPath) {
+                    node.properties._vrpModDir = node.properties?._vrpModDir || dirnameForPath(serializedModPath);
+                }
                 if (strengthWidget && numericStrengthWidget) {
                     strengthWidget.value = normalizedStrengthValue(
                         numericStrengthWidget.value,
@@ -941,6 +956,7 @@ app.registerExtension({
 
             const onConfigure = node.onConfigure;
             node.onConfigure = async function (info) {
+                node._configuredFromWorkflow = true;
                 node.properties._configuredFromWorkflow = true;
                 const res = onConfigure?.apply(this, arguments);
                 if (info && info.widgets_values) {
@@ -966,7 +982,16 @@ app.registerExtension({
                 syncNumericStrength();
                 syncNumericAudioStrength();
 
-                const restoredPath = modPathWidget?.value || node.properties?._vrpModPath || "";
+                const restoredPath = normalizeSelectedModPath(
+                    modPathWidget?.value || node.properties?._vrpModPath || ""
+                );
+                if (modPathWidget) {
+                    modPathWidget.value = restoredPath;
+                }
+                node.properties._vrpModPath = restoredPath;
+                if (restoredPath) {
+                    node.properties._vrpModDir = dirnameForPath(restoredPath);
+                }
                 const restoredDir = node.properties?._vrpModDir || dirnameForPath(restoredPath);
                 const dir = restoredDir || await getRefModsRoot();
                 node.properties._vrpModDir = dir;
@@ -982,7 +1007,16 @@ app.registerExtension({
             setTimeout(async () => {
                 syncNumericStrength();
                 syncNumericAudioStrength();
-                const initialPath = modPathWidget?.value || node.properties?._vrpModPath || "";
+                const initialPath = normalizeSelectedModPath(
+                    modPathWidget?.value || node.properties?._vrpModPath || ""
+                );
+                if (modPathWidget) {
+                    modPathWidget.value = initialPath;
+                }
+                node.properties._vrpModPath = initialPath;
+                if (initialPath) {
+                    node.properties._vrpModDir = node.properties?._vrpModDir || dirnameForPath(initialPath);
+                }
                 const dir = node.properties?._vrpModDir || dirnameForPath(initialPath) || await getRefModsRoot();
                 node.properties._vrpModDir = dir;
                 const initialEntry = await refreshPickerOptions(dir, initialPath || null);
