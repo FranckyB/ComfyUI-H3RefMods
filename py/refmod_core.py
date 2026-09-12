@@ -609,6 +609,10 @@ class H3RefMod:
             raise ValueError(f"kind must be 'image', 'video' or 'audio' (got {self.kind!r})")
         if self.kind == "image":
             self.latent_t = 1
+        if self.audio_latent is None or self.ref_audio_t <= 0:
+            self.audio_latent = None
+            self.audio_concept_type = ""
+            self.ref_audio_t = 0
 
     # ── token budget ──────────────────────────────────────────────────
 
@@ -714,6 +718,7 @@ class H3RefMod:
     def save(self, path_no_ext: str) -> str:
         """Save as a single ``{path}.safetensors`` with metadata in the header."""
         os.makedirs(os.path.dirname(path_no_ext) or ".", exist_ok=True)
+        has_audio_meta = self.kind == "audio" or (self.audio_latent is not None and self.ref_audio_t > 0)
         meta = {
             "name": self.name,
             "kind": self.kind,
@@ -728,11 +733,12 @@ class H3RefMod:
             "tags": self.tags,
             "description": self.description,
             "concept_type": self.concept_type,
-            "audio_concept_type": self.audio_concept_type,
-            "ref_audio_t": self.ref_audio_t,
-            "sample_rate": self.sample_rate,
             "_format_version": 3,
         }
+        if has_audio_meta:
+            meta["audio_concept_type"] = self.audio_concept_type
+            meta["ref_audio_t"] = self.ref_audio_t
+            meta["sample_rate"] = self.sample_rate
         tensors = {"latent": self.latent.contiguous()}
         if self.audio_latent is not None and self.ref_audio_t > 0:
             tensors["audio_latent"] = self.audio_latent.contiguous()

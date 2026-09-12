@@ -36,6 +36,7 @@ This fork aims to make character work simpler, with faster picking, simpler appl
 - `Apply H3 RefMod Advanced` keeps the fuller timing and shaping controls for more deliberate modulation.
 - `Apply H3 RefMod Axis` lets you feed in two `Visual RefMod Picker` selections and treat them like a signed slider for video and audio independently: negative values select A, positive values select B, and `0` means no effect for that channel.
 - `H3 RefMod Step Curve` shapes reference strength across denoising steps rather than across the video timeline.
+Added in - `tools` a `generate_video_thumbnails.py` script, that can generate same-name `.png` thumbnails from `.mp4` files in a folder by grabbing a random frame between 25% and 75% of each clip. This is just a small helper to speed up building large RefMod collections when your videos do not already have preview images.  The random part, is so you can generate again, if unhappy with the chosen frame. (Needs ffmpeg and ffprobe)
 
 ## Notes
 
