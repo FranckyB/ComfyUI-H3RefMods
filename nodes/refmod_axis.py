@@ -1,39 +1,22 @@
 """
-nodes.py — ComfyUI nodes for MiniMax H3 "RefMod" (no-training reference mods)
-
-  H3RefModsAxis         — A/B mod pairs on one signed slider each (negative -> A, positive -> B)
-
+H3RefModApplyAxis — choose between two picker bundles with separate video/audio signed values
+Think of it as creating a Slider from two RefMods
 """
 
 from __future__ import annotations
 
 import os
-from typing import Callable, Dict, List, Optional, Tuple
-import folder_paths
-
+from typing import List, Optional, Tuple
 
 from ..py.refmod_common import (
-    refmods_dir,
     _prompt_hint,
-    _info_lines
 )
 
 from ..py.refmod_core import (
     H3RefMod,
-    read_refmod_meta,
 )
-
-from ..py.debug_grid import (
-    read_graph_meta,
-)
-
 _PACK_DIR = os.path.dirname(os.path.abspath(__file__))
 LEGACY_MODS_DIR = os.path.join(_PACK_DIR, "mods")  # pre-models/refmods storage, still read
-_MOD_CACHE: Dict[str, H3RefMod] = {}
-_MOD_CACHE_MAX = 24          # cap: never pin more mods in RAM than this (FIFO eviction)
-_MOD_LIST_CACHE_KEY = None   # (dirs, mtimes, sizes) signature of the last _list_mod_names() scan
-_MOD_LIST_CACHE_VAL = None
-_MOD_SKIP_DIRS = {"graph_presets", ".git", "__pycache__"}
 
 
 # reference retention presets (master strength multiplier on Apply)
@@ -44,83 +27,31 @@ RETENTION = {
     "weak_reference": 0.15,
 }
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Mods folder helpers
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def _iter_mod_paths(base_dir: str):
-    """Yield ``(relative_stem, absolute_stem)`` for RefMods under ``base_dir``."""
-    for root, dirnames, filenames in os.walk(base_dir):
-        dirnames[:] = sorted(d for d in dirnames if d not in _MOD_SKIP_DIRS)
-        for fn in sorted(filenames):
-            if not fn.endswith(".safetensors"):
-                continue
-            abs_stem = os.path.join(root, fn[:-len(".safetensors")])
-            rel_stem = os.path.relpath(abs_stem, base_dir).replace(os.sep, "/")
-            yield rel_stem, abs_stem
-
-
-def _list_mod_names() -> List[str]:
-    """Available RefMod names across the search dirs (for the loader dropdown).
-
-    Only entries with valid RefMod metadata (embedded in the safetensors header
-    or a legacy sidecar .json) are listed, so other mod formats in
-    models/mods/ (e.g. LTXMod files) don't show up.
-
-    Called by INPUT_TYPES/VALIDATE_INPUTS on every prompt validation, so the
-    result is cached until any mod file appears/disappears/changes (checked
-    via cheap os.stat, not by re-reading every safetensors header).
-    """
-    global _MOD_LIST_CACHE_KEY, _MOD_LIST_CACHE_VAL
-    mods_dir = refmods_dir()
-    sig = []
-    if os.path.isdir(mods_dir):
-        for rel_stem, abs_stem in _iter_mod_paths(mods_dir):
-            try:
-                st = os.stat(abs_stem + ".safetensors")
-                sig.append(f"{mods_dir}:{rel_stem}:{st.st_size}:{int(st.st_mtime)}")
-            except OSError:
-                pass
-    key = "\n".join(sig)
-    if key == _MOD_LIST_CACHE_KEY:
-        return _MOD_LIST_CACHE_VAL
-    names = set()
-    if os.path.isdir(mods_dir):
-        for rel_stem, abs_stem in _iter_mod_paths(mods_dir):
-            meta = read_refmod_meta(abs_stem)
-            if meta is not None and meta.get("kind") in ("image", "video", "audio"):
-                names.add(rel_stem)
-    _MOD_LIST_CACHE_KEY, _MOD_LIST_CACHE_VAL = key, sorted(names)
-    return _MOD_LIST_CACHE_VAL
-
-
-def _find_mod_path(name: str) -> str:
-    mods_dir = refmods_dir()
-    p = os.path.join(mods_dir, name)
-    if os.path.isfile(p + ".safetensors"):
-        return p
-    raise FileNotFoundError(
-        f"RefMod '{name}' not found. Searched:\n" +
-        f"  - {mods_dir}/{name}.safetensors")
-
-
-def _load_mod(name: str) -> H3RefMod:
-    if name in _MOD_CACHE:
-        return _MOD_CACHE[name]
-    mod = H3RefMod.load(_find_mod_path(name), device="cpu")
-    _MOD_CACHE[name] = mod
-    if len(_MOD_CACHE) > _MOD_CACHE_MAX:
-        # FIFO eviction: pop the oldest-loaded mod so a long session loading
-        # many different mods doesn't accumulate every one of them in RAM
-        _MOD_CACHE.pop(next(iter(_MOD_CACHE)))
-    return mod
-
+def _info_lines(mod):
+    opt = mod.optimize_steps
+    if mod.mode == "encode":
+        opt = f"n/a ({mod.optimize_steps} — encode mode stores the actual encode)"
+    return [
+        "=" * 52,
+        f"  MiniMax H3 RefMod: {mod.name}",
+        f"  {'concept_type':<18} {mod.concept_type}",
+        f"  {'mode':<18} {mod.mode}",
+        f"  {'kind':<18} {mod.kind}",
+        f"  {'latent':<18} {tuple(mod.latent.shape)}",
+        f"  {'tokens injected':<18} {mod.token_count}",
+        f"  {'source':<18} {mod.source} ({mod.source_shape})",
+        f"  {'pool':<18} {mod.pool}",
+        f"  {'identity':<18} {opt}",
+        f"  {'tags':<18} {', '.join(mod.tags) if mod.tags else '-'}",
+        f"  {'description':<18} {mod.description or '-'}",
+        "=" * 52,
+    ]
 
 def _mod_group_key(mod: H3RefMod) -> str:
     name = str(getattr(mod, "name", "") or "")
+    lower_name = name.lower()
     for suffix in ("_Video", "_Audio"):
-        if name.endswith(suffix):
+        if lower_name.endswith(suffix.lower()):
             return name[:-len(suffix)]
     return name
 
@@ -146,84 +77,6 @@ def _split_trailing_selection(rows, label: str) -> Tuple[List[Tuple[H3RefMod, fl
         else:
             video_row = row
     return group, video_row, audio_row
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Node: H3RefModLoadAxis (signed A/B sliders)
-# ═══════════════════════════════════════════════════════════════════════════
-
-class H3RefModLoadAxis:
-    """A/B mod pairs on one signed slider each.
-
-    Each row has an A-side mod, a B-side mod and one ``value`` slider in
-    [-1, 1]: negative values use the A mod, positive values use the B mod, and
-    the magnitude is the reference strength (same 0-1 math as the loader).  A
-    value of 0 skips the row entirely.  This makes concept axes like "young
-    <-> old" or "clean <-> weathered" a single dial: extract the two extremes
-    once, then slide between them.
-    """
-
-    MAX_SLOTS = 8
-    NONE = "(none)"
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        names = [cls.NONE] + _list_mod_names()
-        required = {
-            "show_info": ("BOOLEAN", {"default": False,
-                "tooltip": "Print the selected A/B pairs and strengths to the console."}),
-        }
-        for i in range(1, cls.MAX_SLOTS + 1):
-            required[f"mod_a_{i}"] = (names, {"tooltip": f"A-side RefMod {i} (used when value_{i} is negative), or {cls.NONE}."})
-            required[f"mod_b_{i}"] = (names, {"tooltip": f"B-side RefMod {i} (used when value_{i} is positive), or {cls.NONE}."})
-            required[f"value_{i}"] = ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0,
-                "step": 0.01, "display": "number",
-                "tooltip": "Signed strength: negative uses mod_a, positive uses mod_b, 0 skips the "
-                           "row. The magnitude is the reference strength (same 0-1 math as "
-                           "Load H3 RefMods), so -0.5 injects mod_a at half strength."})
-        return {"required": required}
-
-    RETURN_TYPES = ("H3_REF_MODS", "STRING")
-    RETURN_NAMES = ("mods", "prompt_hint")
-    FUNCTION = "load"
-    CATEGORY = "H3RefMod"
-
-    @classmethod
-    def VALIDATE_INPUTS(cls, **kwargs):
-        available = set(_list_mod_names())
-        for i in range(1, cls.MAX_SLOTS + 1):
-            for side in ("a", "b"):
-                name = str(kwargs.get(f"mod_{side}_{i}", cls.NONE))
-                if name and name != cls.NONE and name not in available:
-                    return (f"RefMod slot {i} ({side}): '{name}' not found in mods/. "
-                            "Run Extract H3 RefMod first.")
-        return True
-
-    def load(self, show_info=False, **kwargs):
-        loads = []
-        for i in range(1, self.MAX_SLOTS + 1):
-            value = float(kwargs.get(f"value_{i}", 0.0))
-            if abs(value) < 1e-6:
-                continue
-            side = "b" if value > 0 else "a"
-            name = str(kwargs.get(f"mod_{side}_{i}", self.NONE))
-            if not name or name == self.NONE:
-                continue
-            loads.append((_load_mod(name), min(1.0, abs(value))))
-        if loads:
-            print("[H3RefModsAxis] " + ", ".join(
-                f"{m.name}@{s:+.2f}" for m, s in loads)
-                + f" ({sum(m.token_count for m, _ in loads)} tokens total)")
-        else:
-            print("[H3RefModsAxis] no rows selected (values 0 or both sides (none))")
-        if show_info:
-            for mod, strength in loads:
-                print("\n".join(_info_lines(mod)))
-                print(f"  {'strength':<18} {strength:.2f}")
-        hint = _prompt_hint(loads)
-        if hint:
-            print(f"[H3RefModsAxis] prompt_hint: {hint}")
-        return (loads, hint)
 
 
 class H3RefModApplyAxis:
@@ -324,12 +177,10 @@ class H3RefModApplyAxis:
 
 NODE_CLASS_MAPPINGS = {
     "H3RefModApplyAxis": H3RefModApplyAxis,
-    "H3RefModLoadAxis":  H3RefModLoadAxis,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3RefModApplyAxis": "Apply H3 RefMod Axis",
-    "H3RefModLoadAxis":  "Load H3 RefMod Axis",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

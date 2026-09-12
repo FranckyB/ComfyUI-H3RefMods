@@ -9,6 +9,7 @@ from ..py.refmod_browser import (
     PREVIEW_EXTS,
     browser_root,
     list_browser_dir,
+    paired_mod_path,
     safe_file_path,
 )
 from ..py.refmod_core import H3RefMod
@@ -17,13 +18,11 @@ from .refmod_loader import _MAX_WEIGHT, _append_weighted_mod, _weight_display
 
 _VISUAL_MOD_CACHE: Dict[str, H3RefMod] = {}
 _VISUAL_MOD_CACHE_MAX = 24
-VISUAL_SUFFIX = "_Video"
-AUDIO_SUFFIX = "_Audio"
 
 
 def _load_single_mod_from_path(mod_path: str) -> H3RefMod:
     path = safe_file_path(mod_path)
-    if not path.endswith(".safetensors"):
+    if not path.lower().endswith(".safetensors"):
         raise ValueError("Selected file is not a RefMod safetensors file.")
     if path in _VISUAL_MOD_CACHE:
         return _VISUAL_MOD_CACHE[path]
@@ -37,10 +36,9 @@ def _load_single_mod_from_path(mod_path: str) -> H3RefMod:
 def _load_mods_from_path(mod_path: str) -> List[H3RefMod]:
     path = safe_file_path(mod_path)
     mods = [_load_single_mod_from_path(path)]
-    if path.endswith(VISUAL_SUFFIX + ".safetensors"):
-        audio_path = path[:-len(VISUAL_SUFFIX + ".safetensors")] + AUDIO_SUFFIX + ".safetensors"
-        if os.path.isfile(audio_path):
-            mods.append(_load_single_mod_from_path(audio_path))
+    paired_audio = paired_mod_path(path[:-len(".safetensors")], "audio")
+    if paired_audio is not None:
+        mods.append(_load_single_mod_from_path(paired_audio))
     return mods
 
 
@@ -94,7 +92,7 @@ class H3RefModVisualPicker:
         "Pick a RefMod by browsing models/refmods and its subfolders. "
         "A matching preview image with the same base name is shown when present; "
         "otherwise a placeholder is used. When a matching *_Audio file exists "
-        "beside a *_Video file, both are loaded together and appended to the bundle, "
+        "beside a *_Video or *_Visual file, both are loaded together and appended to the bundle, "
         "with separate video/audio weights. A weight in 0..1 behaves like the old strength control; "
         "a weight above 1 repeats the same RefMod as extra copies. Legacy combined RefMods still use one shared video weight."
     )

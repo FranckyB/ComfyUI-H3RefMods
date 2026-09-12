@@ -9,8 +9,8 @@ from .refmod_core import read_refmod_meta
 
 PREVIEW_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 HIDDEN_BROWSER_DIRS = {"graph_presets"}
-VISUAL_SUFFIX = "_Video"
-AUDIO_SUFFIX = "_Audio"
+VISUAL_SUFFIXES = ("_Video", "_Visual")
+AUDIO_SUFFIXES = ("_Audio",)
 
 
 def browser_root() -> str:
@@ -51,14 +51,34 @@ def safe_file_path(path: str) -> str:
     return current
 
 
+def _strip_known_suffix(path_no_ext: str) -> tuple[str, str | None, str | None]:
+    name = os.path.basename(path_no_ext)
+    lower_name = name.lower()
+    for suffix in VISUAL_SUFFIXES:
+        if lower_name.endswith(suffix.lower()):
+            return (path_no_ext[:-len(suffix)], "visual", suffix)
+    for suffix in AUDIO_SUFFIXES:
+        if lower_name.endswith(suffix.lower()):
+            return (path_no_ext[:-len(suffix)], "audio", suffix)
+    return (path_no_ext, None, None)
+
+
+def paired_mod_path(path_no_ext: str, target_kind: str) -> Optional[str]:
+    base, current_kind, _suffix = _strip_known_suffix(path_no_ext)
+    if current_kind is None:
+        return None
+    suffixes = VISUAL_SUFFIXES if target_kind == "visual" else AUDIO_SUFFIXES
+    for suffix in suffixes:
+        candidate = base + suffix + ".safetensors"
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def _find_preview(path_no_ext: str) -> Optional[str]:
     candidates = [path_no_ext]
-    base = path_no_ext
-    if os.path.basename(base).endswith(VISUAL_SUFFIX):
-        base = base[:-len(VISUAL_SUFFIX)]
-        candidates.insert(0, base)
-    elif os.path.basename(base).endswith(AUDIO_SUFFIX):
-        base = base[:-len(AUDIO_SUFFIX)]
+    base, kind, _suffix = _strip_known_suffix(path_no_ext)
+    if kind is not None:
         candidates.insert(0, base)
     for stem in candidates:
         for ext in PREVIEW_EXTS:
@@ -69,25 +89,23 @@ def _find_preview(path_no_ext: str) -> Optional[str]:
 
 
 def _display_mod_name(path_no_ext: str) -> str:
-    name = os.path.basename(path_no_ext)
-    if name.endswith(VISUAL_SUFFIX):
-        return name[:-len(VISUAL_SUFFIX)] or name
-    if name.endswith(AUDIO_SUFFIX):
-        return name[:-len(AUDIO_SUFFIX)] or name
-    return name
+    base, kind, _suffix = _strip_known_suffix(path_no_ext)
+    if kind is not None:
+        name = os.path.basename(base)
+        return name or os.path.basename(path_no_ext)
+    return os.path.basename(path_no_ext)
 
 
 def _mod_entry(path: str) -> Optional[Dict]:
-    if not path.endswith(".safetensors"):
+    if not path.lower().endswith(".safetensors"):
         return None
     path_no_ext = path[:-len(".safetensors")]
     meta = read_refmod_meta(path_no_ext)
     if meta is None or meta.get("kind") not in ("image", "video", "audio"):
         return None
-    if os.path.basename(path_no_ext).endswith(AUDIO_SUFFIX):
-        paired_visual = path_no_ext[:-len(AUDIO_SUFFIX)] + VISUAL_SUFFIX + ".safetensors"
-        if os.path.isfile(paired_visual):
-            return None
+    _base, kind, _suffix = _strip_known_suffix(path_no_ext)
+    if kind == "audio" and paired_mod_path(path_no_ext, "visual"):
+        return None
     preview = _find_preview(path_no_ext)
     return {
         "name": _display_mod_name(path_no_ext) + ".safetensors",
@@ -115,7 +133,7 @@ def list_browser_dir(path: str = "") -> Dict:
         try:
             if entry.is_dir(follow_symlinks=False):
                 dirs.append({"name": name, "path": os.path.abspath(entry.path)})
-            elif entry.is_file(follow_symlinks=False) and name.endswith(".safetensors"):
+            elif entry.is_file(follow_symlinks=False) and name.lower().endswith(".safetensors"):
                 item = _mod_entry(os.path.abspath(entry.path))
                 if item is not None:
                     mods.append(item)

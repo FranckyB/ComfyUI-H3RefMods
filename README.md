@@ -1,10 +1,10 @@
-# ComfyUI-H3RefMods
+# ComfyUI-H3RefModPicker
 
-Fork of [ComfyUI-MiniMaxH3Mod](https://github.com/Luisacaotica/ComfyUI-MiniMaxH3Mod)
+Companion add-on for [ComfyUI-MiniMaxH3Mod](https://github.com/Luisacaotica/ComfyUI-MiniMaxH3Mod)
 
-Compact RefMod tools for MiniMax H3, fork is tuned more deliberately toward identity workflows while keeping the compatibility with original add-on.  They can both be used at the same time.
+This add-on is meant to work alongside **ComfyUI-MiniMaxH3Mod**. It intentionally provides only a small, focused subset of RefMod features: a visual picker, a simple loader/apply flow, and Create From Folder helpers, while keeping compatibility with the original RefMod format.
 
-This fork aims to make character work simpler, with faster picking, simpler apply flow and easier refMod creation from dataset folders. The more advanced option can be used by installing the original add-on.
+If you want the fuller MiniMax H3 RefMod toolset and more creation/apply options, the recommended install is [ComfyUI-MiniMaxH3Mod](https://github.com/Luisacaotica/ComfyUI-MiniMaxH3Mod).
 
 
 <p align="center">
@@ -27,28 +27,22 @@ This fork aims to make character work simpler, with faster picking, simpler appl
 
 ## Main additions
 
-- `Visual RefMod Picker` lets you browse `models/refmods` visually with previews and append a selected RefMod bundle to an incoming stack. When matching `*_Video` and `*_Audio` files exist for the same RefMod, they are shown as one picker item and loaded together.
-- `Visual RefMod Picker` also exposes separate video/audio weight controls for the two halves of a paired RefMod. A weight from `0` to `1` behaves like the old strength control, while values above `1` repeat the same RefMod as extra copies, so `2.7` means two full copies plus one `0.7` copy.
-- `Create H3 RefMod From Folder` scans a folder of images, video, and optional audio, writes metadata, and saves upstream-compatible split RefMods as `*_Video.safetensors` and `*_Audio.safetensors` when audio is present. It can also batch-create one RefMod set per immediate subfolder and copy a matching thumbnail beside the saved mod.
-- `Create H3 RefMod From Inputs` creates a RefMod directly from wired image, video, and optional audio inputs.
-- `Load RefMod` and `Load RefMod Stack` load one or more saved RefMods for reuse and now use the same weight behavior: `0..1` is regular strength, values above `1` expand into repeated copies plus a fractional tail.
-- `Apply H3 RefMod` is the streamlined apply node for the usual identity case, using a flat full-length reference curve.
-- `Apply H3 RefMod Advanced` keeps the fuller timing and shaping controls for more deliberate modulation.
-- `Apply H3 RefMod Axis` lets you feed in two `Visual RefMod Picker` selections and treat them like a signed slider for video and audio independently: negative values select A, positive values select B, and `0` means no effect for that channel.
-- `H3 RefMod Step Curve` shapes reference strength across denoising steps rather than across the video timeline.
-Added in - `tools` a `generate_video_thumbnails.py` script, that can generate same-name `.png` thumbnails from `.mp4` files in a folder by grabbing a random frame between 25% and 75% of each clip. This is just a small helper to speed up building large RefMod collections when your videos do not already have preview images.  The random part, is so you can generate again, if unhappy with the chosen frame. (Needs ffmpeg and ffprobe)
+- `Visual RefMod Picker` lets you browse using a **RefMods** browser.
+- Paired RefMods are grouped as one logical item in the picker. When matching visual and audio files exist together, they are shown as one entry and loaded together, with separate video/audio weight controls. This uses a weight behavior: `0..1` is regular strength, values above `1` expand into repeated copies. For example, a weight of 2.7, would be the same as strenght:1.0, copies:2.7
+- `Create H3 RefMod From Folder` scans a folder of images, video, and audio, saves split RefMods. It can also batch-create RefMods for all subfolder found.
+- `Load RefMod` is a singular loader. It use the same weight behavior as the Picker.
+- `Simple Apply H3 RefMod` and `Apply H3 RefMod Axis` provide a streamlined apply and a simple modulation flow for 2 Characters.
+- `tools/generate_video_thumbnails.py` can generate same-name `.png` thumbnails from `.mp4` files in a folder by grabbing a random frame between 25% and 75% of each clip. This is a small helper to speed up large RefMod collections when the videos do not already have preview images. It requires `ffmpeg` and `ffprobe`.
 
 ## Notes
 
-- This fork keeps prior RefMod behavior and compatibility in place, but have been set to default to an identity-oriented workflow.
-- Split `*_Video` and `*_Audio` RefMods are designed to stay compatible with `ComfyUI-MiniMaxH3Mod`, while the local picker/browser groups them as one logical item for convenience.
-
-More advanced explaination can be found at [ComfyUI-MiniMaxH3Mod](https://github.com/Luisacaotica/ComfyUI-MiniMaxH3Mod)
+- This repo is a minimal companion add-on, not the full RefMod toolkit.
+- For more options and the complete MiniMax H3 RefMod feature set, [ComfyUI-MiniMaxH3Mod](https://github.com/Luisacaotica/ComfyUI-MiniMaxH3Mod) is the recommended install.
 
 ## Installation
 
 ### Manual
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/FranckyB/ComfyUI-H3RefMods
+git clone https://github.com/FranckyB/ComfyUI-H3RefModPicker
 ```

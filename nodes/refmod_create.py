@@ -1,25 +1,5 @@
 """
-create_refmod.py — H3RefModCreateFromFolder + H3RefModExtract nodes.
-
-Single location for both RefMod-creation methods:
-
-  H3RefModCreateFromFolder  — folder-driven extraction:
-                              Point it at a dataset folder,
-                              give the mod a name and concept type, and it
-                              scans the folder for reference media (images, videos, audio),
-                              encodes them with the connected H3 VAEs, and saves the mod.
-
-  H3RefModCreateFromInputs  — connection-driven extraction:
-                              Connect media (images, videos, audio) directly.
-                              Give the mod a name and concept type, and it
-                              creates a saved mod from the connected inputs.
-
-
-Both scan/encode their refs with the connected H3 VAE(s) and save a
-``.safetensors`` mod, output as an ``H3_REF_MODS`` bundle; the only
-difference is where the reference media comes from (a folder scan vs.
-wired-in tensors).  Both are flagged as output nodes (``is_output_node=True``)
-so they actually run standalone, without anything connected downstream.
+H3RefModCreateFromFolder — folder-driven extraction of reference media into a saved RefMod.
 """
 
 from __future__ import annotations
@@ -39,7 +19,6 @@ from comfy_api.latest import io
 
 from ..py.refmod_common import (
     list_media_files,
-    load_image_file,
     load_video_file,
     refmods_dir,
 )
@@ -329,7 +308,7 @@ def _copy_refmod_thumbnail(images: List[str], path_no_ext: str) -> None:
         return
     ext = os.path.splitext(thumb_src)[1].lower()
     thumb_base = path_no_ext
-    if thumb_base.endswith(VISUAL_SUFFIX):
+    if thumb_base.lower().endswith(VISUAL_SUFFIX.lower()):
         thumb_base = thumb_base[:-len(VISUAL_SUFFIX)]
     thumb_dst = thumb_base + ext
     shutil.copy2(thumb_src, thumb_dst)
@@ -348,9 +327,11 @@ def _resolve_output_dir(subfolder: str = "") -> str:
 
 def _base_refmod_name(name: str) -> str:
     base = _sanitize_name(name)
+    lower_base = base.lower()
     for suffix in (VISUAL_SUFFIX, AUDIO_SUFFIX):
-        if base.endswith(suffix):
+        if lower_base.endswith(suffix.lower()):
             base = base[:-len(suffix)]
+            lower_base = base.lower()
     return base or _sanitize_name(name)
 
 
@@ -932,8 +913,8 @@ def _create_mod_from_folder(
 class H3RefModCreateFromFolder(io.ComfyNode):
     """Create a RefMod from every image/video/audio in a folder.
 
-    The in-graph version of ``generate_refmod.py``: scans a dataset folder,
-    encodes the media with the connected H3 VAEs, and saves a visual RefMod.
+    Scans a dataset folder, encodes the media with the connected H3 VAEs,
+    and saves a visual RefMod.
     When audio is present and an audio VAE is connected, it also saves a
     paired audio RefMod. Defaults to an ``identity`` concept in ``encode``
     mode — the right choice for a person/character.
@@ -1172,7 +1153,7 @@ class H3RefModCreateFromInputs(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="H3RefModCreateFromInputs",
-            display_name="Create H3 RefMod From Inputs",
+            display_name="Create H3 RefMod From Inputs (Deprecated)",
             description=(
                 "Turn one or more references of the same concept into a RefMod. "
                 "Stills plug into ref_image_1, video frames into ref_video_1, "
@@ -1182,7 +1163,9 @@ class H3RefModCreateFromInputs(io.ComfyNode):
                 "compresses the refs to a grid and refines it — good identity at "
                 "a fraction of the tokens; 'encode' stores the full-res encode "
                 "(max identity, MB-size mod, ~1K tokens/img). Optional audio can "
-                "be extracted into a paired audio RefMod using the MiniMax H3 audio VAE."
+                "be extracted into a paired audio RefMod using the MiniMax H3 audio VAE. "
+                "Deprecated: for future workflows, prefer 'Create H3 RefMod Master' from "
+                "ComfyUI-MiniMaxH3Mod."
             ),
             category="H3RefMod",
             inputs=[
@@ -1692,5 +1675,5 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3RefModCreateFromFolder": "Create H3 RefMod From Folder",
-    "H3RefModCreateFromInputs": "Create H3 RefMod From Inputs",
+    "H3RefModCreateFromInputs": "Create H3 RefMod From Inputs (Deprecated)",
 }
