@@ -2,6 +2,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 const PLACEHOLDER_IMAGE_PATH = new URL("./placeholder.png", import.meta.url).href;
+const DEFAULT_PICKER_NODE_SIZE = [240, 480];
 
 function isTypingTarget(target) {
     if (!target) return false;
@@ -488,7 +489,7 @@ function createRefModBrowserModal(initialPath, onSelect) {
 }
 
 app.registerExtension({
-    name: "H3RefMods.VisualRefModPicker",
+    name: "H3RefModPicker.VisualRefModPicker",
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData?.name !== "H3RefModVisualPicker") return;
@@ -979,7 +980,7 @@ app.registerExtension({
                     void loadPreview(initialPath ? { path: initialPath, preview_path: node.properties?._vrpPreviewPath || "" } : null);
                 }
                 if (!node.properties?._configuredFromWorkflow) {
-                    node.setSize([240, 400]);
+                    node.setSize([...DEFAULT_PICKER_NODE_SIZE]);
                 }
             }, 10);
 
@@ -988,4 +989,4 @@ app.registerExtension({
     },
 });
 
-console.log("[H3RefMods] VisualRefModPicker extension loaded");
+console.log("[H3RefModPicker] VisualRefModPicker extension loaded");

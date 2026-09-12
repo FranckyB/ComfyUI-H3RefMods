@@ -325,7 +325,7 @@ function enhanceCreateNode(node) {
 }
 
 app.registerExtension({
-    name: "H3RefMods.RefModCreate",
+    name: "H3RefModPicker.RefModCreate",
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (!TARGET_NODES.has(nodeData?.name)) return;
@@ -339,4 +339,4 @@ app.registerExtension({
     },
 });
 
-console.log("[H3RefMods] RefModCreate extension loaded");
+console.log("[H3RefModPicker] RefModCreate extension loaded");
