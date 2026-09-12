@@ -77,6 +77,16 @@ function buildPreviewUrl(path) {
     return api.apiURL(`/h3refmods/refmod-browser/file?path=${encodeURIComponent(path)}`);
 }
 
+function installPreviewFallback(img) {
+    if (!img || img.dataset.vrpFallbackInstalled === "1") return img;
+    img.dataset.vrpFallbackInstalled = "1";
+    img.addEventListener("error", () => {
+        if (img.src === PLACEHOLDER_IMAGE_PATH) return;
+        img.src = PLACEHOLDER_IMAGE_PATH;
+    });
+    return img;
+}
+
 function normalizePathKey(value) {
     return String(value || "").replace(/\\/g, "/").replace(/\/+/g, "/").toLowerCase();
 }
@@ -383,6 +393,7 @@ function createRefModBrowserModal(initialPath, onSelect) {
             position: relative;
         `;
         const img = document.createElement("img");
+        installPreviewFallback(img);
         img.src = entry.preview_path ? `${buildPreviewUrl(entry.preview_path)}&${Date.now()}` : PLACEHOLDER_IMAGE_PATH;
         img.style.cssText = `
             width: 100%;
@@ -552,6 +563,7 @@ app.registerExtension({
 
             const img = document.createElement("img");
             img.draggable = false;
+            installPreviewFallback(img);
             img.src = PLACEHOLDER_IMAGE_PATH;
             img.style.cssText = `
                 position: absolute;
