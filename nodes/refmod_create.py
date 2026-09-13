@@ -234,6 +234,11 @@ def _scan_folder(folder: str) -> "tuple[List[str], List[str], List[str]]":
                 p = os.path.join(folder, fn)
                 if os.path.isfile(p):
                     audios.append(p)
+    if not images and not videos and not audios:
+        print(
+            f"[H3RefModCreateFromFolder] scan: '{folder}' contains no supported image, video, or audio files "
+            "at the top level."
+        )
     return images, videos, audios
 
 
@@ -1063,13 +1068,19 @@ class H3RefModCreateFromFolder(io.ComfyNode):
             description="", subfolder="", budget_policy="truncate",
             save=True, use_subfolders=False, save_dir="") -> io.NodeOutput:
         del save_dir
+        raw_folder = (folder or "").strip().strip('"')
         if not (folder or "").strip().strip('"'):
+            print("[H3RefModCreateFromFolder] folder input is empty; refusing to scan.")
             raise ValueError(
                 "Create H3 RefMod: 'folder' is empty. Point it at a dataset folder "
                 "(absolute path, or a name inside input/) — the node refuses to run "
                 "without one so it can't accidentally scan your whole input/ directory.")
         folder = _resolve_folder(folder)
         mode = normalize_mode(mode)
+        print(
+            f"[H3RefModCreateFromFolder] start: folder='{raw_folder}' -> '{folder}', "
+            f"use_subfolders={bool(use_subfolders)}, preset='{extraction_preset}', mode='{mode}'"
+        )
 
         if use_subfolders:
             subfolders = [
@@ -1080,7 +1091,8 @@ class H3RefModCreateFromFolder(io.ComfyNode):
             if not subfolders:
                 raise ValueError(
                     f"H3RefModCreateFromFolder: use_subfolders=True but no subfolders "
-                    f"found in '{folder}'.")
+                    f"found in '{folder}'. In subfolder mode, files placed directly in "
+                    "that folder are ignored.")
             print(f"[H3RefModCreateFromFolder] subfolder mode: {len(subfolders)} folder(s)")
             mods = []
             for sub in subfolders:
